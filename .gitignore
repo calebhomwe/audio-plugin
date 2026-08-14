@@ -1,0 +1,6 @@
+build/
+.vs/
+*.user
+games/
+index.html
+repos/
