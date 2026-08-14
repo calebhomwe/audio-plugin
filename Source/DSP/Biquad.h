@@ -61,6 +61,12 @@ public:
         return 20.0f * std::log10(mag);
     }
 
+    void dbg() const
+    {
+        std::cout << "coeffs " << b0 << " " << b1 << " " << b2 << " " << a1 << " " << a2
+                  << " state " << x1 << " " << x2 << " " << y1 << " " << y2 << "\n";
+    }
+
 private:
     float w0(float f) const { return 2.0f * 3.14159265f * f / (float)fs; }
     void normalize(float a0)

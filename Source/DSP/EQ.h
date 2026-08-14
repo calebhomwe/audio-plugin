@@ -14,8 +14,9 @@ public:
         juce::ignoreUnused(blockSize);
         fs = sampleRate;
         smoothCoef = 1.0f - std::exp(-1.0f / (0.010f * (float)sampleRate));
-        for (int i = 0; i < 7; ++i)
-            bands[i].prepare(sampleRate);
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < 7; ++i)
+                bands[ch][i].prepare(sampleRate);
         hpMix.prepare(sampleRate);
         lpMix.prepare(sampleRate);
         masterMix.prepare(sampleRate);
@@ -33,8 +34,9 @@ public:
 
     void reset()
     {
-        for (int i = 0; i < 7; ++i)
-            bands[i].reset();
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < 7; ++i)
+                bands[ch][i].reset();
         hpMix.prepare(fs);
         lpMix.prepare(fs);
         masterMix.prepare(fs);
@@ -48,7 +50,7 @@ public:
         {
             float* ch = buffer.getWritePointer(0);
             for (int s = 0; s < numSamples; ++s)
-                ch[s] = processSample(ch[s]);
+                ch[s] = processSample(ch[s], 0);
         }
         else if (numChannels == 2)
         {
@@ -56,8 +58,8 @@ public:
             float* r = buffer.getWritePointer(1);
             for (int s = 0; s < numSamples; ++s)
             {
-                l[s] = processSample(l[s]);
-                r[s] = processSample(r[s]);
+                l[s] = processSample(l[s], 0);
+                r[s] = processSample(r[s], 1);
             }
         }
     }
@@ -100,15 +102,24 @@ public:
             return 0.0f;
         float sum = 0.0f;
         if (hpOn)
-            sum += bands[0].magnitudeDbAt(freq);
-        sum += bands[1].magnitudeDbAt(freq);
-        sum += bands[2].magnitudeDbAt(freq);
-        sum += bands[3].magnitudeDbAt(freq);
-        sum += bands[4].magnitudeDbAt(freq);
-        sum += bands[5].magnitudeDbAt(freq);
+            sum += bands[0][0].magnitudeDbAt(freq);
+        sum += bands[0][1].magnitudeDbAt(freq);
+        sum += bands[0][2].magnitudeDbAt(freq);
+        sum += bands[0][3].magnitudeDbAt(freq);
+        sum += bands[0][4].magnitudeDbAt(freq);
+        sum += bands[0][5].magnitudeDbAt(freq);
         if (lpOn)
-            sum += bands[6].magnitudeDbAt(freq);
+            sum += bands[0][6].magnitudeDbAt(freq);
         return sum;
+    }
+
+    void dbgDump()
+    {
+        std::cout << "curGain: " << curGain[0] << " " << curGain[1] << " " << curGain[2] << " "
+                  << curGain[3] << " " << curGain[4] << " " << curGain[5] << " " << curGain[6] << "\n";
+        std::cout << "curFreq: " << curFreq[0] << " " << curFreq[1] << " " << curFreq[2] << " "
+                  << curFreq[3] << " " << curFreq[4] << " " << curFreq[5] << " " << curFreq[6] << "\n";
+        for (int i = 0; i < 7; ++i) { std::cout << "band " << i << ": "; bands[0][i].dbg(); }
     }
 
 private:
@@ -118,25 +129,28 @@ private:
 
     void updateBand(int i)
     {
-        switch (i)
+        for (int ch = 0; ch < 2; ++ch)
         {
-        case 0:
-            bands[0].setHighPass(curFreq[0], 0.70710678f);
-            break;
-        case 1:
-            bands[1].setLowShelf(curFreq[1], curGain[1], 0.9f);
-            break;
-        case 2:
-        case 3:
-        case 4:
-            bands[i].setPeaking(curFreq[i], curGain[i], curQ[i]);
-            break;
-        case 5:
-            bands[5].setHighShelf(curFreq[5], curGain[5], 0.9f);
-            break;
-        case 6:
-            bands[6].setLowPass(curFreq[6], 0.70710678f);
-            break;
+            switch (i)
+            {
+            case 0:
+                bands[ch][0].setHighPass(curFreq[0], 0.70710678f);
+                break;
+            case 1:
+                bands[ch][1].setLowShelf(curFreq[1], curGain[1], 0.9f);
+                break;
+            case 2:
+            case 3:
+            case 4:
+                bands[ch][i].setPeaking(curFreq[i], curGain[i], curQ[i]);
+                break;
+            case 5:
+                bands[ch][5].setHighShelf(curFreq[5], curGain[5], 0.9f);
+                break;
+            case 6:
+                bands[ch][6].setLowPass(curFreq[6], 0.70710678f);
+                break;
+            }
         }
         lastFreq[i] = curFreq[i];
         lastGain[i] = curGain[i];
@@ -158,26 +172,26 @@ private:
         }
     }
 
-    float processSample(float x)
+    float processSample(float x, int ch)
     {
         smoothParams();
-        float y = bands[0].process(x);
+        float y = bands[ch][0].process(x);
         const float mHp = hpMix.next();
         y = y * mHp + x * (1.0f - mHp);
-        y = bands[1].process(y);
-        y = bands[2].process(y);
-        y = bands[3].process(y);
-        y = bands[4].process(y);
-        y = bands[5].process(y);
+        y = bands[ch][1].process(y);
+        y = bands[ch][2].process(y);
+        y = bands[ch][3].process(y);
+        y = bands[ch][4].process(y);
+        y = bands[ch][5].process(y);
         const float lpIn = y;
-        y = bands[6].process(y);
+        y = bands[ch][6].process(y);
         const float mLp = lpMix.next();
         y = y * mLp + lpIn * (1.0f - mLp);
         const float mMaster = masterMix.next();
         return y * mMaster + x * (1.0f - mMaster);
     }
 
-    Biquad bands[7];
+    Biquad bands[2][7];
     SmoothBypass hpMix;
     SmoothBypass lpMix;
     SmoothBypass masterMix;
