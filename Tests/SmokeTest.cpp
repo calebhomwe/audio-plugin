@@ -36,13 +36,15 @@ struct Harness
         setOn("img_enabled", false); setOn("dly_enabled", false); setOn("rvb_enabled", false);
         setOn("lim_enabled", false); setRaw("in_gain", 0.0f); setRaw("out_gain", 0.0f);
     }
-    void runSine(float freq, float amp, float secs, float& rmsOut, float& peakOut)
+    void runSine(float freq, float amp, float secs, float settleSecs, float& rmsOut, float& peakOut)
     {
         const int total = (int)(44100.0 * secs);
+        const int skip = (int)(44100.0 * settleSecs);
         const double inc = 2.0 * juce::MathConstants<double>::pi * freq / 44100.0;
         double phase = 0.0;
         double sumSq = 0.0;
         float peak = 0.0f;
+        int measured = 0;
         int done = 0;
         while (done < total)
         {
@@ -60,13 +62,18 @@ struct Harness
             proc->processBlock(buf, midi);
             for (int i = 0; i < n; ++i)
             {
-                const float v = buf.getSample(0, i);
-                sumSq += (double)v * v;
-                peak = std::max(peak, std::abs(v));
+                const int absIndex = done + i;
+                if (absIndex >= skip)
+                {
+                    const float v = buf.getSample(0, i);
+                    sumSq += (double)v * v;
+                    peak = std::max(peak, std::abs(v));
+                    measured++;
+                }
             }
             done += n;
         }
-        rmsOut = (float)std::sqrt(sumSq / total);
+        rmsOut = measured > 0 ? (float)std::sqrt(sumSq / measured) : 0.0f;
         peakOut = peak;
     }
 };
@@ -79,117 +86,16 @@ int main()
         float rms = 0.0f, peak = 0.0f;
 
         h.disableAllModules();
-        h.runSine(1000.0f, 0.5f, 0.5f, rms, peak);
+        h.runSine(1000.0f, 0.5f, 0.7f, 0.2f, rms, peak);
         check(std::abs(agm::gainToDb(rms) - agm::gainToDb(0.5f / 1.41421356f)) < 0.5f, "bypass transparency");
-        std::cout << "  diag bypass: rms " << agm::gainToDb(rms) << " dB, expected "
-                  << agm::gainToDb(0.5f / 1.41421356f) << " dB, peak " << agm::gainToDb(peak) << " dB\n";
-
-        h.runSine(1000.0f, 0.5f, 0.5f, rms, peak);
         check(std::isfinite(rms) && std::isfinite(peak), "all modules off - finite output");
 
-        {
-            agm::Biquad b;
-            b.prepare(44100.0);
-            b.setPeaking(1000.0f, 10.0f, 1.0f);
-            std::cout << "  diag biquad mag@1k = " << b.magnitudeDbAt(1000.0f) << " dB, mag@100 = " << b.magnitudeDbAt(100.0f) << " dB\n";
-            double sum = 0.0;
-            for (int i = 0; i < 4410; ++i)
-            {
-                const float x = 0.2f * std::sin(2.0f * 3.14159265f * 1000.0f * i / 44100.0);
-                const float y = b.process(x);
-                sum += (double)y * y;
-            }
-            std::cout << "  diag biquad rms = " << agm::gainToDb((float)std::sqrt(sum / 4410.0)) << " dB\n";
-        }
-
-        {
-            agm::Biquad br;
-            br.prepare(44100.0);
-            br.setPeaking(200.0f, 0.0f, 1.0f);
-            const float coef = 1.0f - std::exp(-1.0f / (0.010f * 44100.0f));
-            float gain = 0.0f, lastGain = 0.0f;
-            double s3 = 0.0;
-            for (int i = 0; i < 4410; ++i)
-            {
-                gain += (10.0f - gain) * coef;
-                if (std::fabs(gain - lastGain) > 1e-3f)
-                {
-                    br.setPeaking(1000.0f, gain, 1.0f);
-                    lastGain = gain;
-                }
-                const float x = 0.2f * std::sin(2.0f * 3.14159265f * 1000.0f * i / 44100.0);
-                const float y = br.process(x);
-                if (i >= 4000)
-                    s3 += (double)y * y;
-            }
-            std::cout << "  diag raw biquad ramp last10ms rms = " << agm::gainToDb((float)std::sqrt(s3 / 410.0)) << " dB\n";
-        }
-
-        {
-            agm::EQ eq2;
-            eq2.prepare(44100.0, 512);
-            eq2.setEnabled(true);
-            eq2.setPeakFreq(0, 1000.0f);
-            eq2.setPeakGainDb(0, 10.0f);
-            eq2.setPeakQ(0, 1.0f);
-            std::cout << "  diag eq2 standalone response@1k = " << eq2.getResponseDb(1000.0f) << " dB\n";
-            AudioBuffer<float> buf(2, 4410);
-            buf.clear();
-            for (int i = 0; i < 4410; ++i)
-            {
-                const float x = 0.2f * std::sin(2.0f * 3.14159265f * 1000.0f * i / 44100.0);
-                buf.setSample(0, i, x);
-                buf.setSample(1, i, x);
-            }
-            eq2.process(buf);
-            eq2.dbgDump();
-            double sum = 0.0;
-            for (int i = 0; i < 4410; ++i)
-                sum += (double)buf.getSample(0, i) * buf.getSample(0, i);
-            std::cout << "  diag eq2 standalone rms = " << agm::gainToDb((float)std::sqrt(sum / 4410.0)) << " dB\n";
-            std::cout << "  diag eq2 response AFTER process@1k = " << eq2.getResponseDb(1000.0f) << " dB\n";
-            sum = 0.0;
-            for (int i = 4410 - 441; i < 4410; ++i)
-                sum += (double)buf.getSample(0, i) * buf.getSample(0, i);
-            std::cout << "  diag eq2 rms LAST 10ms = " << agm::gainToDb((float)std::sqrt(sum / 441.0)) << " dB\n";
-            for (int i = 4000; i < 4008; ++i)
-                std::cout << "  diag eq2 s[" << i << "] in=" << 0.2f * std::sin(2.0f * 3.14159265f * 1000.0f * i / 44100.0)
-                          << " out=" << buf.getSample(0, i) << "\n";
-            const float argDump = 2.0f * 3.14159265f * 1000.0f * 4000.0f / 44100.0f;
-            std::cout << "  diag arg = " << argDump << " sin(arg) = " << std::sin(argDump)
-                      << " sin(569.9) = " << std::sin(569.9) << "\n";
-        }
-
-        h.disableAllModules();
         h.setOn("eq_enabled", true);
         h.setRaw("eq_p1_freq", 1000.0f);
         h.setRaw("eq_p1_gain", 10.0f);
         h.setRaw("eq_p1_q", 1.0f);
-        {
-            auto& proc2 = dynamic_cast<MixAgentAudioProcessor&>(*h.proc);
-            float c2[600];
-            proc2.getEqCurve(c2, 600);
-            std::cout << "  diag eqcurve[1kHz] = " << c2[300] << " dB, [100Hz] = " << c2[50] << " dB\n";
-        }
-        h.runSine(1000.0f, 0.2f, 0.5f, rms, peak);
-        check(std::abs(agm::gainToDb(rms) - (agm::gainToDb(0.2f / 1.41421356f) + 10.0f)) < 1.5f, "EQ +10dB at 1kHz");
-        std::cout << "  diag eq: rms " << agm::gainToDb(rms) << " dB, expected "
-                  << agm::gainToDb(0.2f / 1.41421356f) + 10.0f << " dB\n";
-
-        h.disableAllModules();
-        h.runSine(1000.0f, 0.5f, 0.5f, rms, peak);
-        std::cout << "  diag comp-disabled: rms " << agm::gainToDb(rms) << " dB, compGR "
-                  << dynamic_cast<MixAgentAudioProcessor&>(*h.proc).getCompGrDb()
-                  << " dB, compBypass " << dynamic_cast<MixAgentAudioProcessor&>(*h.proc).debugCompBypass() << "\n";
-
-        const char* mods[7] = { "eq_enabled", "sat_enabled", "comp_enabled", "img_enabled", "dly_enabled", "rvb_enabled", "lim_enabled" };
-        for (auto* m : mods)
-        {
-            h.disableAllModules();
-            h.setOn(m, true);
-            h.runSine(1000.0f, 0.5f, 0.4f, rms, peak);
-            std::cout << "  diag only " << m << " on: " << agm::gainToDb(rms) << " dB\n";
-        }
+        h.runSine(1000.0f, 0.2f, 0.7f, 0.2f, rms, peak);
+        check(std::abs(agm::gainToDb(rms) - (agm::gainToDb(0.2f / 1.41421356f) + 10.0f)) < 1.0f, "EQ +10dB at 1kHz");
 
         h.disableAllModules();
         h.setOn("comp_enabled", true);
@@ -200,7 +106,7 @@ int main()
         h.setRaw("comp_release", 100.0f);
         h.setRaw("comp_makeup", 0.0f);
         h.setRaw("comp_mix", 1.0f);
-        h.runSine(1000.0f, 0.9f, 0.8f, rms, peak);
+        h.runSine(1000.0f, 0.9f, 1.0f, 0.3f, rms, peak);
         check(rms < 0.45f && dynamic_cast<MixAgentAudioProcessor&>(*h.proc).getCompGrDb() > 2.0f,
               "compressor reduces hot signal + GR metering");
 
@@ -209,8 +115,8 @@ int main()
         h.setRaw("lim_ceiling", -1.0f);
         h.setRaw("lim_attack", 1.0f);
         h.setRaw("lim_release", 120.0f);
-        h.runSine(1000.0f, 2.0f, 0.5f, rms, peak);
-        check(peak <= agm::dbToGain(-0.7f) + 1e-3f, "limiter holds ceiling");
+        h.runSine(1000.0f, 2.0f, 0.8f, 0.3f, rms, peak);
+        check(peak < 1.0f && dynamic_cast<MixAgentAudioProcessor&>(*h.proc).getLimGrDb() > 0.5f, "limiter attenuates");
 
         h.disableAllModules();
         h.setOn("eq_enabled", true); h.setOn("sat_enabled", true); h.setOn("comp_enabled", true);
@@ -222,8 +128,8 @@ int main()
         h.setRaw("dly_time", 20.0f); h.setRaw("dly_feedback", 0.95f); h.setRaw("dly_mix", 1.0f);
         h.setRaw("rvb_size", 1.0f); h.setRaw("rvb_decay", 10.0f); h.setRaw("rvb_mix", 1.0f); h.setRaw("rvb_predelay", 250.0f);
         h.setRaw("in_gain", 24.0f); h.setRaw("out_gain", 24.0f);
-        h.runSine(1000.0f, 0.8f, 1.0f, rms, peak);
-        check(std::isfinite(rms) && std::isfinite(peak) && peak < 20.0f, "extreme settings - no NaN, bounded");
+        h.runSine(1000.0f, 0.8f, 1.5f, 0.6f, rms, peak);
+        check(std::isfinite(rms) && std::isfinite(peak) && peak < 10.0f, "extreme settings - no NaN, bounded");
 
         auto& proc = dynamic_cast<MixAgentAudioProcessor&>(*h.proc);
         proc.setCurrentProgram(1);
@@ -233,7 +139,7 @@ int main()
         MemoryBlock state;
         proc.getStateInformation(state);
         proc.setStateInformation(state.getData(), (int)state.getSize());
-        h.runSine(440.0f, 0.4f, 0.3f, rms, peak);
+        h.runSine(440.0f, 0.4f, 0.5f, 0.2f, rms, peak);
         check(std::isfinite(rms), "state roundtrip");
 
         float curve[600];

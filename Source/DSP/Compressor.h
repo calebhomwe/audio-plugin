@@ -101,7 +101,6 @@ public:
         }
     }
 
-    float debugBypass() const { return bypass.value(); }
     void setEnabled(bool on) { bypass.setEnabled(on); }
     void setThresholdDb(float v) { thresholdDb = juce::jlimit(-60.0f, 0.0f, v); }
     void setRatio(float v) { ratio = juce::jlimit(1.0f, 20.0f, v); }

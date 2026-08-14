@@ -20,6 +20,7 @@ public:
         delayLines.assign(2, std::vector<float>(delaySamples, 0.0f));
         writePos.assign(2, 0);
         currentGain = 1.0f;
+        levelEnv = 0.0f;
         grSmoother.store(0.0f, std::memory_order_relaxed);
         updateCoefs();
         bypass.prepare(sampleRate);
@@ -32,6 +33,7 @@ public:
             std::fill(line.begin(), line.end(), 0.0f);
         std::fill(writePos.begin(), writePos.end(), 0);
         currentGain = 1.0f;
+        levelEnv = 0.0f;
         grSmoother.store(0.0f, std::memory_order_relaxed);
         bypass.prepare(sr);
         bypass.setEnabled(enabled);
@@ -54,7 +56,9 @@ public:
             for (int ch = 0; ch < numChannels; ++ch)
                 level = juce::jmax(level, std::fabs(buffer.getReadPointer(ch)[i]));
 
-            const float target = juce::jmin(1.0f, ceilingGain / juce::jmax(level, 1e-6f));
+            levelEnv = (level > levelEnv) ? level : levelEnv + (level - levelEnv) * releaseCoef;
+
+            const float target = juce::jmin(1.0f, ceilingGain / juce::jmax(levelEnv, 1e-6f));
             currentGain += (target - currentGain) * ((target < currentGain) ? attackCoef : releaseCoef);
 
             const float mix = bypass.next();
@@ -123,6 +127,7 @@ private:
     float releaseCoef = 0.0f;
     float grCoef = 0.0f;
     float currentGain = 1.0f;
+    float levelEnv = 0.0f;
     std::atomic<float> grSmoother{ 0.0f };
     bool enabled = true;
     SmoothBypass bypass;

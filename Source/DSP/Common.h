@@ -23,7 +23,6 @@ public:
         return current;
     }
     bool fullyOff() const { return current < 0.0001f && target == 0.0f; }
-    float value() const { return current; }
 
 private:
     float current = 1.0f;

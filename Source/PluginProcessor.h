@@ -48,7 +48,6 @@ public:
     float getOutLevel(int ch) const;
     float getCompGrDb() const { return compressor.getGainReductionDb(); }
     float getLimGrDb() const { return limiter.getGainReductionDb(); }
-    float debugCompBypass() const { return compressor.debugBypass(); }
     juce::StringArray skipModules;
 
 private:

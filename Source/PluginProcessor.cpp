@@ -99,7 +99,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout MixAgentAudioProcessor::crea
 
 void MixAgentAudioProcessor::parameterChanged(const juce::String& parameterID, float newValue)
 {
-    std::cout << "[trace] apvts listener fired: " << parameterID << " = " << newValue << "\n";
     handleParameter(parameterID, newValue);
 }
 

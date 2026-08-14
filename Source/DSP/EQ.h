@@ -113,15 +113,6 @@ public:
         return sum;
     }
 
-    void dbgDump()
-    {
-        std::cout << "curGain: " << curGain[0] << " " << curGain[1] << " " << curGain[2] << " "
-                  << curGain[3] << " " << curGain[4] << " " << curGain[5] << " " << curGain[6] << "\n";
-        std::cout << "curFreq: " << curFreq[0] << " " << curFreq[1] << " " << curFreq[2] << " "
-                  << curFreq[3] << " " << curFreq[4] << " " << curFreq[5] << " " << curFreq[6] << "\n";
-        for (int i = 0; i < 7; ++i) { std::cout << "band " << i << ": "; bands[0][i].dbg(); }
-    }
-
 private:
     static float clampFreq(float f) { return f < 20.0f ? 20.0f : (f > 20000.0f ? 20000.0f : f); }
     static float clampGain(float g) { return g < -15.0f ? -15.0f : (g > 15.0f ? 15.0f : g); }
