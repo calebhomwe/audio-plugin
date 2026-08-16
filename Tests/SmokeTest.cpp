@@ -1,4 +1,4 @@
-#include <JuceHeader.h>
+﻿#include <JuceHeader.h>
 #include "../Source/PluginProcessor.h"
 
 using namespace juce;
@@ -151,6 +151,48 @@ int main()
             if (!std::isfinite(curve[i]) || !std::isfinite(spec[i]))
                 finite = false;
         check(finite, "analyzer + EQ curve finite");
+
+        // instrument bank: clean chain, fire notes per program (blocks <= prepared size)
+        h.disableAllModules();
+        h.setRaw("inst_level", 0.0f);
+        dynamic_cast<MixAgentAudioProcessor&>(*h.proc).setInstrumentProgram((int)agm::InstrumentBank::Pluck);
+        {
+            MidiBuffer mb;
+            mb.addEvent(MidiMessage::noteOn(1, 60, 0.9f), 0);
+            AudioBuffer<float> buf(2, 512);
+            buf.clear();
+            h.proc->processBlock(buf, mb);
+            bool anyNonZero = false; bool allFinite = true;
+            for (int i = 0; i < 512; ++i)
+            {
+                const float L = std::abs(buf.getSample(0, i));
+                const float R = std::abs(buf.getSample(1, i));
+                if (L > 1e-5f || R > 1e-5f) anyNonZero = true;
+                if (!std::isfinite(L) || !std::isfinite(R)) allFinite = false;
+            }
+            check(anyNonZero && allFinite, "instrument bank produces finite audio");
+            mb.clear();
+            mb.addEvent(MidiMessage::noteOff(1, 60), 0);
+            buf.clear();
+            h.proc->processBlock(buf, mb);
+        }
+        for (int p = 0; p < (int)agm::InstrumentBank::kCount; ++p)
+        {
+            { MidiBuffer off; off.addEvent(MidiMessage::noteOff(1, 60), 0);
+              AudioBuffer<float> b(2, 64); b.clear(); h.proc->processBlock(b, off); }
+            dynamic_cast<MixAgentAudioProcessor&>(*h.proc).setInstrumentProgram(p);
+            MidiBuffer mb; mb.addEvent(MidiMessage::noteOn(1, 60, 0.8f), 0);
+            AudioBuffer<float> buf(2, 512); buf.clear();
+            h.proc->processBlock(buf, mb);
+            float peak = 0.0f; bool finite = true;
+            for (int i = 0; i < 512; ++i)
+            {
+                const float v = std::abs(buf.getSample(0, i));
+                peak = std::max(peak, v);
+                if (!std::isfinite(v)) finite = false;
+            }
+            check(finite && peak < 2.0f, (std::string("program ") + agm::InstrumentBank::programName(p) + " finite/bounded").c_str());
+        }
     }
 
     std::cout << (gFailures == 0 ? "ALL TESTS PASSED" : "SOME TESTS FAILED") << "\n";

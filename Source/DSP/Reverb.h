@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_dsp/juce_dsp.h>
 #include "Common.h"
+#include <algorithm>
 #include <cmath>
 #include <vector>
 
@@ -25,55 +26,53 @@ public:
         for (int i = 0; i < 8; ++i)
         {
             combs[i].line.maxLen = maxLength(combs[i].baseLen);
-            combs[i].line.buf.assign(combs[i].line.maxLen, 0.0f);
+            combs[i].line.buf.assign((size_t)combs[i].line.maxLen, 0.0f);
             combs[i].line.idx = 0;
             combs[i].lpState = 0.0f;
         }
         for (int i = 0; i < 4; ++i)
         {
             allpasses[i].line.maxLen = maxLength(allpasses[i].baseLen);
-            allpasses[i].line.buf.assign(allpasses[i].line.maxLen, 0.0f);
+            allpasses[i].line.buf.assign((size_t)allpasses[i].line.maxLen, 0.0f);
             allpasses[i].line.idx = 0;
         }
 
-        const int preMax = (int)std::ceil(0.250 * sr) + 1;
+        const int preMax = (int)std::ceil(0.250 * sr) + 2;
         for (int i = 0; i < 2; ++i)
         {
             predelays[i].maxLen = preMax;
-            predelays[i].buf.assign(preMax, 0.0f);
+            predelays[i].buf.assign((size_t)preMax, 0.0f);
             predelays[i].wIdx = 0;
-            predelays[i].delaySamples = 0;
         }
+        preDelayF = maxPreDelaySamples();
 
-        mixCoef = 1.0f - std::exp(-1.0f / (0.015f * (float)sr));
+        const float srF = (float)sr;
+        const float blockSec = (float)bs / srF;
+        mixCoef = 1.0f - std::exp(-1.0f / (0.015f * srF));
+        paramCoef = 1.0f - std::exp(-blockSec / 0.020f);
+        sizeCoef = 1.0f - std::exp(-blockSec / 0.060f);
         bypass.prepare(sr);
         decayCur = decayTarget;
         dampCur = dampTarget;
         mixCur = mixTarget;
+        sizeCur = size;
+        widthCur = width;
         updateCoefficients();
     }
 
     void reset()
     {
-        for (int i = 0; i < 8; ++i)
-        {
-            for (size_t j = 0; j < combs[i].line.buf.size(); ++j) combs[i].line.buf[j] = 0.0f;
-            combs[i].line.idx = 0;
-            combs[i].lpState = 0.0f;
-        }
-        for (int i = 0; i < 4; ++i)
-        {
-            for (size_t j = 0; j < allpasses[i].line.buf.size(); ++j) allpasses[i].line.buf[j] = 0.0f;
-            allpasses[i].line.idx = 0;
-        }
+        clearTank();
         for (int i = 0; i < 2; ++i)
         {
-            for (size_t j = 0; j < predelays[i].buf.size(); ++j) predelays[i].buf[j] = 0.0f;
+            std::fill(predelays[i].buf.begin(), predelays[i].buf.end(), 0.0f);
             predelays[i].wIdx = 0;
         }
         decayCur = decayTarget;
         dampCur = dampTarget;
         mixCur = mixTarget;
+        sizeCur = size;
+        widthCur = width;
     }
 
     void process(juce::AudioBuffer<float>& buffer)
@@ -104,7 +103,14 @@ private:
         std::vector<float> buf;
         int maxLen = 0;
         int idx = 0;
-        int curLen = 0;
+        int curLen = 8;
+
+        void setLength(int len)
+        {
+            curLen = len;
+            if (idx >= len)
+                idx %= len;
+        }
     };
 
     struct Comb
@@ -127,15 +133,21 @@ private:
         std::vector<float> buf;
         int maxLen = 0;
         int wIdx = 0;
-        int delaySamples = 0;
 
-        float next(float in)
+        float next(float in, float delayF)
         {
-            buf[wIdx] = in;
-            int r = wIdx - delaySamples;
-            if (r < 0) r += maxLen;
-            const float out = buf[r];
-            if (++wIdx >= maxLen) wIdx = 0;
+            buf[(size_t)wIdx] = in;
+            float rp = (float)wIdx - delayF;
+            if (rp < 0.0f)
+                rp += (float)maxLen;
+            const int i0 = (int)rp;
+            const float f = rp - (float)i0;
+            int i1 = i0 + 1;
+            if (i1 >= maxLen)
+                i1 = 0;
+            const float out = buf[(size_t)i0] * (1.0f - f) + buf[(size_t)i1] * f;
+            if (++wIdx >= maxLen)
+                wIdx = 0;
             return out;
         }
     };
@@ -153,120 +165,144 @@ private:
 
     int scaledLength(int base) const
     {
-        const int len = (int)std::lround((double)base * sr / 44100.0 * size);
+        const int len = (int)std::lround((double)base * sr / 44100.0 * (double)sizeCur);
         return len < 8 ? 8 : len;
+    }
+
+    float maxPreDelaySamples() const
+    {
+        const float v = (float)std::lround((double)preDelayMs * 0.001 * sr);
+        const float lim = (float)(predelays[0].maxLen - 2);
+        return v < lim ? v : lim;
     }
 
     void updateCoefficients()
     {
-        const float blockSec = (float)bs / (float)sr;
-        const float k = 1.0f - std::exp(-blockSec / 0.020f);
-        decayCur += (decayTarget - decayCur) * k;
-        dampCur += (dampTarget - dampCur) * k;
+        decayCur += (decayTarget - decayCur) * paramCoef;
+        dampCur += (dampTarget - dampCur) * paramCoef;
+        sizeCur += (size - sizeCur) * sizeCoef;
+        widthCur += (width - widthCur) * paramCoef;
 
+        const float srF = (float)sr;
         const float fc = 200.0f * std::pow(100.0f, 1.0f - dampCur);
-        const float g = 1.0f - std::exp(-6.2831853f * fc / (float)sr);
+        const float g = 1.0f - std::exp(-6.2831853f * fc / srF);
 
         for (int i = 0; i < 8; ++i)
         {
-            const int len = scaledLength(combs[i].baseLen);
-            combs[i].line.curLen = len;
-            const float delaySec = (float)len / (float)sr;
+            Comb& c = combs[i];
+            const int len = scaledLength(c.baseLen);
+            c.line.setLength(len);
+            const float delaySec = (float)len / srF;
             const float fb = std::exp(-6.9078f * delaySec / decayCur);
-            combs[i].fb = fb > 0.999f ? 0.999f : fb;
-            combs[i].lpCoef = g;
+            c.fb = fb > 0.999f ? 0.999f : fb;
+            c.lpCoef = g;
         }
 
         for (int i = 0; i < 4; ++i)
-            allpasses[i].line.curLen = scaledLength(allpasses[i].baseLen);
+            allpasses[i].line.setLength(scaledLength(allpasses[i].baseLen));
 
-        int ps = (int)std::lround((double)preDelayMs * 0.001 * sr);
-        if (ps > predelays[0].maxLen - 1) ps = predelays[0].maxLen - 1;
-        if (ps < 0) ps = 0;
-        predelays[0].delaySamples = ps;
-        predelays[1].delaySamples = ps;
+        preDelayF += (maxPreDelaySamples() - preDelayF) * paramCoef;
+    }
+
+    float combProcess(Comb& c, float in)
+    {
+        DelayLine& dl = c.line;
+        const float out = dl.buf[(size_t)dl.idx];
+        const float lp = c.lpState + c.lpCoef * (out - c.lpState);
+        c.lpState = lp;
+        float v = in + lp * c.fb;
+        if (!std::isfinite(v))
+        {
+            clearTank();
+            v = 0.0f;
+        }
+        else if (v > -1.0e-24f && v < 1.0e-24f)
+            v = 0.0f;
+        dl.buf[(size_t)dl.idx] = v;
+        if (++dl.idx >= dl.curLen)
+            dl.idx = 0;
+        return out;
     }
 
     float allpassProcess(Allpass& a, float in)
     {
-        const float out = a.line.buf[a.line.idx];
-        const float y = out - in;
-        a.line.buf[a.line.idx] = in + 0.5f * out;
-        if (++a.line.idx >= a.line.curLen) a.line.idx = 0;
-        return y;
+        DelayLine& dl = a.line;
+        const float out = dl.buf[(size_t)dl.idx];
+        dl.buf[(size_t)dl.idx] = in + 0.5f * out;
+        if (++dl.idx >= dl.curLen)
+            dl.idx = 0;
+        return out - in;
+    }
+
+    void clearTank()
+    {
+        for (auto& c : combs)
+        {
+            std::fill(c.line.buf.begin(), c.line.buf.end(), 0.0f);
+            c.line.idx = 0;
+            c.lpState = 0.0f;
+        }
+        for (auto& a : allpasses)
+        {
+            std::fill(a.line.buf.begin(), a.line.buf.end(), 0.0f);
+            a.line.idx = 0;
+        }
     }
 
     void processMono(float* data, int n)
     {
-        const float g = 0.015f;
+        const float inGain = 0.015f;
         for (int s = 0; s < n; ++s)
         {
-            const float dry = data[s];
-            const float in = dry * g;
+            float dry = data[s];
+            if (!std::isfinite(dry))
+                dry = 0.0f;
+            const float in = dry * inGain;
             float acc = 0.0f;
-            for (int i = 0; i < 4; ++i)
-            {
-                Comb& c = combs[i];
-                const float out = c.line.buf[c.line.idx];
-                const float lp = c.lpState + c.lpCoef * (out - c.lpState);
-                c.lpState = lp;
-                c.line.buf[c.line.idx] = in + lp * c.fb;
-                if (++c.line.idx >= c.line.curLen) c.line.idx = 0;
-                acc += out;
-            }
-            float wet = acc;
+            for (int i = 0; i < 8; ++i)
+                acc += combProcess(combs[i], in);
+            float wet = acc * 0.5f;
             wet = allpassProcess(allpasses[0], wet);
             wet = allpassProcess(allpasses[1], wet);
+            wet = allpassProcess(allpasses[2], wet);
+            wet = allpassProcess(allpasses[3], wet);
             const float bg = bypass.next();
-            const float wetOut = predelays[0].next(wet * bg);
+            const float wetOut = predelays[0].next(wet, preDelayF);
             mixCur += (mixTarget - mixCur) * mixCoef;
-            data[s] = dry + (wetOut - dry) * mixCur;
+            const float m = mixCur * bg;
+            data[s] = dry + (wetOut - dry) * m;
         }
     }
 
     void processStereo(float* L, float* R, int n)
     {
-        const float g = 0.015f;
-        const float w1 = 0.5f * (1.0f + width);
-        const float w2 = 0.5f * (1.0f - width);
+        const float inGain = 0.015f;
+        const float w1 = 0.5f * (1.0f + widthCur);
+        const float w2 = 0.5f * (1.0f - widthCur);
         for (int s = 0; s < n; ++s)
         {
-            const float dryL = L[s], dryR = R[s];
-            const float inL = dryL * g;
-            const float inR = dryR * g;
+            float dryL = L[s], dryR = R[s];
+            if (!std::isfinite(dryL))
+                dryL = 0.0f;
+            if (!std::isfinite(dryR))
+                dryR = 0.0f;
+            const float inL = dryL * inGain;
+            const float inR = dryR * inGain;
             float accL = 0.0f;
             float accR = 0.0f;
             for (int i = 0; i < 4; ++i)
-            {
-                Comb& c = combs[i];
-                const float out = c.line.buf[c.line.idx];
-                const float lp = c.lpState + c.lpCoef * (out - c.lpState);
-                c.lpState = lp;
-                c.line.buf[c.line.idx] = inL + lp * c.fb;
-                if (++c.line.idx >= c.line.curLen) c.line.idx = 0;
-                accL += out;
-            }
+                accL += combProcess(combs[i], inL);
             for (int i = 4; i < 8; ++i)
-            {
-                Comb& c = combs[i];
-                const float out = c.line.buf[c.line.idx];
-                const float lp = c.lpState + c.lpCoef * (out - c.lpState);
-                c.lpState = lp;
-                c.line.buf[c.line.idx] = inR + lp * c.fb;
-                if (++c.line.idx >= c.line.curLen) c.line.idx = 0;
-                accR += out;
-            }
-            float wetL = accL;
-            float wetR = accR;
-            wetL = allpassProcess(allpasses[0], wetL);
+                accR += combProcess(combs[i], inR);
+            float wetL = allpassProcess(allpasses[0], accL);
             wetL = allpassProcess(allpasses[1], wetL);
-            wetR = allpassProcess(allpasses[2], wetR);
+            float wetR = allpassProcess(allpasses[2], accR);
             wetR = allpassProcess(allpasses[3], wetR);
-            const float wL = w1 * wetL + w2 * wetR;
-            const float wR = w2 * wetL + w1 * wetR;
+            const float mixL = w1 * wetL + w2 * wetR;
+            const float mixR = w2 * wetL + w1 * wetR;
             const float bg = bypass.next();
-            const float wetOutL = predelays[0].next(wL);
-            const float wetOutR = predelays[1].next(wR);
+            const float wetOutL = predelays[0].next(mixL, preDelayF);
+            const float wetOutR = predelays[1].next(mixR, preDelayF);
             mixCur += (mixTarget - mixCur) * mixCoef;
             const float m = mixCur * bg;
             L[s] = dryL + (wetOutL - dryL) * m;
@@ -282,15 +318,20 @@ private:
     double sr = 44100.0;
     int bs = 512;
     float size = 0.5f;
+    float sizeCur = 0.5f;
     float decayTarget = 2.0f;
     float decayCur = 2.0f;
     float dampTarget = 0.5f;
     float dampCur = 0.5f;
     float width = 1.0f;
+    float widthCur = 1.0f;
     float mixTarget = 0.5f;
     float mixCur = 0.5f;
     float preDelayMs = 0.0f;
+    float preDelayF = 0.0f;
     float mixCoef = 0.0f;
+    float paramCoef = 0.0f;
+    float sizeCoef = 0.0f;
 };
 
 } // namespace agm

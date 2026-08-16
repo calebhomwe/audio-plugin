@@ -94,6 +94,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout MixAgentAudioProcessor::crea
     layout.add(std::make_unique<AudioParameterFloat>("lim_ceiling", "Lim Ceiling", -20.0f, 0.0f, -1.0f));
     layout.add(std::make_unique<AudioParameterFloat>("lim_attack", "Lim Attack", 0.01f, 10.0f, 1.0f));
     layout.add(std::make_unique<AudioParameterFloat>("lim_release", "Lim Release", 10.0f, 500.0f, 120.0f));
+
+    layout.add(std::make_unique<AudioParameterBool>("bass_enabled", "Bass On", true));
+    layout.add(std::make_unique<AudioParameterFloat>("bass_drive", "Bass Drive", 0.1f, 4.0f, 1.2f));
+    layout.add(std::make_unique<AudioParameterFloat>("bass_glide", "Bass Glide", 0.0f, 1.0f, 0.08f));
+    layout.add(std::make_unique<AudioParameterFloat>("bass_level", "Bass Level", -40.0f, 6.0f, -6.0f));
+    layout.add(std::make_unique<AudioParameterFloat>("drum_level", "Drum Level", -40.0f, 6.0f, -14.0f));
+
+    juce::StringArray instNames;
+    for (int i = 0; i < (int)agm::InstrumentBank::kCount; ++i)
+        instNames.add(agm::InstrumentBank::programName(i));
+    layout.add(std::make_unique<AudioParameterBool>("inst_enabled", "Inst On", true));
+    layout.add(std::make_unique<AudioParameterChoice>("inst_program", "Instrument", instNames, 0));
+    layout.add(std::make_unique<AudioParameterFloat>("inst_level", "Inst Level", -40.0f, 6.0f, -6.0f));
     return layout;
 }
 
@@ -158,6 +171,14 @@ void MixAgentAudioProcessor::handleParameter(const juce::String& id, float rawVa
     else if (id == "lim_ceiling") { limiter.setCeilingDb(rawValue); }
     else if (id == "lim_attack") { limiter.setAttackMs(rawValue); }
     else if (id == "lim_release") { limiter.setReleaseMs(rawValue); }
+    else if (id == "bass_enabled") { drumEngine.setEnabled(rawValue > 0.5f); }
+    else if (id == "bass_drive") { drumEngine.setBassDrive(rawValue); }
+    else if (id == "bass_glide") { drumEngine.setBassGlideSec(rawValue); }
+    else if (id == "bass_level") { drumEngine.setBassLevelDb(rawValue); }
+    else if (id == "drum_level") { drumEngine.setDrumLevelDb(rawValue); }
+    else if (id == "inst_enabled") { instruments.setEnabled(rawValue > 0.5f); }
+    else if (id == "inst_program") { instruments.setProgram((int)(rawValue + 0.5f)); }
+    else if (id == "inst_level") { instruments.setLevelDb(rawValue); }
 }
 
 void MixAgentAudioProcessor::syncModules()
@@ -177,6 +198,8 @@ void MixAgentAudioProcessor::prepareToPlay(double sr, int blockSize)
     delay.prepare(sr, blockSize);
     reverb.prepare(sr, blockSize);
     limiter.prepare(sr, blockSize);
+    drumEngine.prepare(sr, blockSize);
+    instruments.prepare(sr, blockSize);
 
     fftIn.assign(kFftSize, 0.0f);
     fftWork.assign(kFftSize * 2, 0.0f);
@@ -201,13 +224,64 @@ void MixAgentAudioProcessor::prepareToPlay(double sr, int blockSize)
 
 void MixAgentAudioProcessor::releaseResources() {}
 
-void MixAgentAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+void MixAgentAudioProcessor::uiNoteOn(int note, float velocity)
+{
+    const juce::ScopedLock sl(uiNoteLock);
+    uiNotes.addEvent(juce::MidiMessage::noteOn(1, note, velocity), 0);
+}
+
+void MixAgentAudioProcessor::uiNoteOff(int note)
+{
+    const juce::ScopedLock sl(uiNoteLock);
+    uiNotes.addEvent(juce::MidiMessage::noteOff(1, note), 0);
+}
+
+void MixAgentAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
     juce::ScopedNoDenormals noDenormals;
     const int numSamples = buffer.getNumSamples();
     const int numCh = buffer.getNumChannels();
     if (numSamples == 0 || numCh == 0)
         return;
+
+    // instruments/drums render first: instrument bus feeds the FX chain
+    auto isDrumNote = [](int n) { return n >= 35 && n <= 49; };
+    for (const auto metadata : midiMessages)
+    {
+        const auto msg = metadata.getMessage();
+        const int note = msg.getNoteNumber();
+        if (msg.isNoteOn())
+        {
+            if (isDrumNote(note)) drumEngine.noteOn(note, msg.getFloatVelocity());
+            else instruments.noteOn(note, msg.getFloatVelocity());
+        }
+        else if (msg.isNoteOff())
+        {
+            if (isDrumNote(note)) drumEngine.noteOff(note, 0.0f);
+            else instruments.noteOff(note, 0.0f);
+        }
+    }
+    {
+        const juce::ScopedLock sl(uiNoteLock);
+        for (const auto metadata : uiNotes)
+        {
+            const auto msg = metadata.getMessage();
+            const int note = msg.getNoteNumber();
+            if (msg.isNoteOn())
+            {
+                if (isDrumNote(note)) drumEngine.noteOn(note, msg.getFloatVelocity());
+                else instruments.noteOn(note, msg.getFloatVelocity());
+            }
+            else if (msg.isNoteOff())
+            {
+                if (isDrumNote(note)) drumEngine.noteOff(note, 0.0f);
+                else instruments.noteOff(note, 0.0f);
+            }
+        }
+        uiNotes.clear();
+    }
+    instruments.renderAdd(buffer, numCh);
+    drumEngine.renderAdd(buffer, numCh);
 
     const float gainCoef = 1.0f - std::exp(-(float)numSamples / (0.010f * (float)sampleRate));
     const float inTarget = agm::dbToGain(inGainDb);
@@ -421,3 +495,4 @@ void MixAgentAudioProcessor::setCurrentProgram(int index)
         break;
     }
 }
+

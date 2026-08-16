@@ -7,6 +7,8 @@
 #include "DSP/Delay.h"
 #include "DSP/Reverb.h"
 #include "DSP/Limiter.h"
+#include "DSP/DrumEngine.h"
+#include "DSP/InstrumentBank.h"
 
 class MixAgentAudioProcessor : public juce::AudioProcessor, public juce::AudioProcessorValueTreeState::Listener
 {
@@ -22,7 +24,7 @@ public:
     bool hasEditor() const override { return true; }
 
     const juce::String getName() const override { return "MixAgent"; }
-    bool acceptsMidi() const override { return false; }
+    bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
     double getTailLengthSeconds() const override { return 5.0; }
@@ -48,7 +50,15 @@ public:
     float getOutLevel(int ch) const;
     float getCompGrDb() const { return compressor.getGainReductionDb(); }
     float getLimGrDb() const { return limiter.getGainReductionDb(); }
+    bool getDrumActive() const { return drumEngine.isActive(); }
+    bool getInstrumentActive() const { return instruments.isActive(); }
+    int getInstrumentProgram() const { return instruments.getProgram(); }
+    void setInstrumentProgram(int p) { instruments.setProgram(p); }
     juce::StringArray skipModules;
+
+    // UI-driven triggers (message thread safe; drained on the audio thread)
+    void uiNoteOn(int note, float velocity);
+    void uiNoteOff(int note);
 
 private:
     void handleParameter(const juce::String& id, float rawValue);
@@ -65,6 +75,8 @@ private:
     agm::Delay delay;
     agm::Reverb reverb;
     agm::Limiter limiter;
+    agm::DrumEngine drumEngine;
+    agm::InstrumentBank instruments;
 
     float inGainDb = 0.0f, outGainDb = 0.0f;
     float inGainSmoothed = 1.0f, outGainSmoothed = 1.0f;
@@ -75,6 +87,9 @@ private:
     std::atomic<float> inLevelL { 0.0f }, inLevelR { 0.0f };
     std::atomic<float> outLevelL { 0.0f }, outLevelR { 0.0f };
     float inPeakL = 0.0f, inPeakR = 0.0f, outPeakL = 0.0f, outPeakR = 0.0f;
+
+    juce::CriticalSection uiNoteLock;
+    juce::MidiBuffer uiNotes;
 
     static constexpr int kFftSize = 2048;
     static constexpr int kAnaBins = 600;

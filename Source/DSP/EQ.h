@@ -12,14 +12,14 @@ public:
     void prepare(double sampleRate, int blockSize)
     {
         juce::ignoreUnused(blockSize);
-        fs = sampleRate;
-        smoothCoef = 1.0f - std::exp(-1.0f / (0.010f * (float)sampleRate));
+        fs = sampleRate > 1.0 ? sampleRate : 44100.0;
+        smoothCoef = 1.0f - std::exp(-1.0f / (0.010f * (float)fs));
         for (int ch = 0; ch < 2; ++ch)
             for (int i = 0; i < 7; ++i)
-                bands[ch][i].prepare(sampleRate);
-        hpMix.prepare(sampleRate);
-        lpMix.prepare(sampleRate);
-        masterMix.prepare(sampleRate);
+                bands[ch][i].prepare(fs);
+        hpMix.prepare(fs);
+        lpMix.prepare(fs);
+        masterMix.prepare(fs);
         for (int i = 0; i < 7; ++i)
         {
             curFreq[i] = tgtFreq[i];
@@ -46,18 +46,24 @@ public:
     {
         const int numChannels = buffer.getNumChannels();
         const int numSamples = buffer.getNumSamples();
+        if (numSamples <= 0 || numChannels <= 0)
+            return;
         if (numChannels == 1)
         {
             float* ch = buffer.getWritePointer(0);
             for (int s = 0; s < numSamples; ++s)
+            {
+                smoothParams();
                 ch[s] = processSample(ch[s], 0);
+            }
         }
-        else if (numChannels == 2)
+        else
         {
             float* l = buffer.getWritePointer(0);
             float* r = buffer.getWritePointer(1);
             for (int s = 0; s < numSamples; ++s)
             {
+                smoothParams();
                 l[s] = processSample(l[s], 0);
                 r[s] = processSample(r[s], 1);
             }
@@ -114,9 +120,21 @@ public:
     }
 
 private:
-    static float clampFreq(float f) { return f < 20.0f ? 20.0f : (f > 20000.0f ? 20000.0f : f); }
-    static float clampGain(float g) { return g < -15.0f ? -15.0f : (g > 15.0f ? 15.0f : g); }
-    static float clampQ(float q) { return q < 0.2f ? 0.2f : (q > 10.0f ? 10.0f : q); }
+    static float clampFreq(float f)
+    {
+        f = sanitize(f, 1000.0f);
+        return f < 20.0f ? 20.0f : (f > 20000.0f ? 20000.0f : f);
+    }
+    static float clampGain(float g)
+    {
+        g = sanitize(g);
+        return g < -15.0f ? -15.0f : (g > 15.0f ? 15.0f : g);
+    }
+    static float clampQ(float q)
+    {
+        q = sanitize(q, 1.0f);
+        return q < 0.2f ? 0.2f : (q > 10.0f ? 10.0f : q);
+    }
 
     void updateBand(int i)
     {
@@ -155,17 +173,24 @@ private:
             curFreq[i] += (tgtFreq[i] - curFreq[i]) * smoothCoef;
             curGain[i] += (tgtGain[i] - curGain[i]) * smoothCoef;
             curQ[i] += (tgtQ[i] - curQ[i]) * smoothCoef;
-            const bool freqChanged = std::fabs(curFreq[i] - lastFreq[i]) > 1e-4f * lastFreq[i];
-            const bool gainChanged = std::fabs(curGain[i] - lastGain[i]) > 1e-3f;
-            const bool qChanged = std::fabs(curQ[i] - lastQ[i]) > 1e-3f;
-            if (freqChanged || gainChanged || qChanged)
+            if (std::fabs(tgtFreq[i] - curFreq[i]) < 0.01f)
+                curFreq[i] = tgtFreq[i];
+            if (std::fabs(tgtGain[i] - curGain[i]) < 0.0015f)
+                curGain[i] = tgtGain[i];
+            if (std::fabs(tgtQ[i] - curQ[i]) < 0.0008f)
+                curQ[i] = tgtQ[i];
+            const bool changed = std::fabs(curFreq[i] - lastFreq[i]) > 1e-4f * lastFreq[i]
+                              || std::fabs(curGain[i] - lastGain[i]) > 1e-3f
+                              || std::fabs(curQ[i] - lastQ[i]) > 1e-3f;
+            if (changed)
                 updateBand(i);
         }
     }
 
     float processSample(float x, int ch)
     {
-        smoothParams();
+        if (!std::isfinite(x))
+            x = 0.0f;
         float y = bands[ch][0].process(x);
         const float mHp = hpMix.next();
         y = y * mHp + x * (1.0f - mHp);
@@ -179,7 +204,8 @@ private:
         const float mLp = lpMix.next();
         y = y * mLp + lpIn * (1.0f - mLp);
         const float mMaster = masterMix.next();
-        return y * mMaster + x * (1.0f - mMaster);
+        y = y * mMaster + x * (1.0f - mMaster);
+        return std::isfinite(y) ? y : 0.0f;
     }
 
     Biquad bands[2][7];

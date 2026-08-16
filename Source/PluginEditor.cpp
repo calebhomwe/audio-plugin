@@ -4,7 +4,7 @@
 MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcessor& p)
     : AudioProcessorEditor(p), proc(p)
 {
-    setSize(1160, 640);
+    setSize(1160, 790);
 
     logoLabel.setText("MIXAGENT", juce::dontSendNotification);
     logoLabel.setFont(juce::Font(juce::FontOptions(24.0f, juce::Font::bold)));
@@ -61,31 +61,46 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
     addPower("dly_enabled");
     addPower("rvb_enabled");
     addPower("lim_enabled");
+    addPower("inst_enabled");
 
     hpToggle = addToggle("eq_hp_enabled", "HP");
     lpToggle = addToggle("eq_lp_enabled", "LP");
     monoToggle = addToggle("img_mono", "MONO");
 
-    hpKnob = addKnob("eq_hp_freq", "HP", " Hz", 0);
-    lpKnob = addKnob("eq_lp_freq", "LP", " Hz", 0);
-    lsfF = addKnob("eq_lsf_freq", "LS F", " Hz", 0);
+    auto hzText = [](double v)
+    {
+        return v >= 1000.0 ? juce::String(v / 1000.0, 1) + " kHz"
+                           : juce::String(juce::roundToInt(v)) + " Hz";
+    };
+    auto pctText = [](double v) { return juce::String(juce::roundToInt(v * 100.0)) + "%"; };
+
+    hpKnob = addKnob("eq_hp_freq", "HP", "", 0);
+    hpKnob->textFromValueFunction = hzText;
+    lpKnob = addKnob("eq_lp_freq", "LP", "", 0);
+    lpKnob->textFromValueFunction = hzText;
+    lsfF = addKnob("eq_lsf_freq", "LS F", "", 0);
+    lsfF->textFromValueFunction = hzText;
     lsfG = addKnob("eq_lsf_gain", "LS G", " dB", 1);
-    hsfF = addKnob("eq_hsf_freq", "HS F", " Hz", 0);
+    hsfF = addKnob("eq_hsf_freq", "HS F", "", 0);
+    hsfF->textFromValueFunction = hzText;
     hsfG = addKnob("eq_hsf_gain", "HS G", " dB", 1);
-    p1F = addKnob("eq_p1_freq", "P1 F", " Hz", 0);
+    p1F = addKnob("eq_p1_freq", "P1 F", "", 0);
+    p1F->textFromValueFunction = hzText;
     p1G = addKnob("eq_p1_gain", "P1 G", " dB", 1);
     p1Q = addKnob("eq_p1_q", "P1 Q", "", 2);
-    p2F = addKnob("eq_p2_freq", "P2 F", " Hz", 0);
+    p2F = addKnob("eq_p2_freq", "P2 F", "", 0);
+    p2F->textFromValueFunction = hzText;
     p2G = addKnob("eq_p2_gain", "P2 G", " dB", 1);
     p2Q = addKnob("eq_p2_q", "P2 Q", "", 2);
-    p3F = addKnob("eq_p3_freq", "P3 F", " Hz", 0);
+    p3F = addKnob("eq_p3_freq", "P3 F", "", 0);
+    p3F->textFromValueFunction = hzText;
     p3G = addKnob("eq_p3_gain", "P3 G", " dB", 1);
     p3Q = addKnob("eq_p3_q", "P3 Q", "", 2);
 
     satDrive = addKnob("sat_drive", "DRIVE", "", 0);
-    satDrive->textFromValueFunction = [](double v) { return juce::String((int)(v * 100.0)) + "%"; };
+    satDrive->textFromValueFunction = pctText;
     satMix = addKnob("sat_mix", "MIX", "", 0);
-    satMix->textFromValueFunction = [](double v) { return juce::String((int)(v * 100.0)) + "%"; };
+    satMix->textFromValueFunction = pctText;
     satOut = addKnob("sat_out", "OUT", " dB", 1);
 
     compT = addKnob("comp_thresh", "THRESH", " dB", 0);
@@ -94,36 +109,62 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
     compRel = addKnob("comp_release", "RELEASE", " ms", 0);
     compK = addKnob("comp_knee", "KNEE", " dB", 0);
     compMix = addKnob("comp_mix", "MIX", "", 0);
-    compMix->textFromValueFunction = [](double v) { return juce::String((int)(v * 100.0)) + "%"; };
+    compMix->textFromValueFunction = pctText;
     compMake = addKnob("comp_makeup", "MAKEUP", " dB", 0);
 
     imgW = addKnob("img_width", "WIDTH", "", 0);
-    imgW->textFromValueFunction = [](double v) { return juce::String((int)v) + "%"; };
+    imgW->textFromValueFunction = [](double v) { return juce::String(juce::roundToInt(v)) + "%"; };
     imgB = addKnob("img_balance", "BAL", "", 2);
 
     dlyT = addKnob("dly_time", "TIME", " ms", 0);
     dlyF = addKnob("dly_feedback", "FEEDBACK", "", 0);
-    dlyF->textFromValueFunction = [](double v) { return juce::String((int)(v * 100.0)) + "%"; };
+    dlyF->textFromValueFunction = pctText;
     dlyM = addKnob("dly_mix", "MIX", "", 0);
-    dlyM->textFromValueFunction = [](double v) { return juce::String((int)(v * 100.0)) + "%"; };
+    dlyM->textFromValueFunction = pctText;
     dlyD = addKnob("dly_damp", "DAMP", "", 0);
-    dlyD->textFromValueFunction = [](double v) { return juce::String((int)(v * 100.0)) + "%"; };
+    dlyD->textFromValueFunction = pctText;
     dlyW = addKnob("dly_width", "WIDTH", "", 0);
-    dlyW->textFromValueFunction = [](double v) { return juce::String((int)(v * 100.0)) + "%"; };
+    dlyW->textFromValueFunction = pctText;
 
     rvbS = addKnob("rvb_size", "SIZE", "", 2);
     rvbDc = addKnob("rvb_decay", "DECAY", " s", 1);
     rvbD = addKnob("rvb_damp", "DAMP", "", 0);
-    rvbD->textFromValueFunction = [](double v) { return juce::String((int)(v * 100.0)) + "%"; };
+    rvbD->textFromValueFunction = pctText;
     rvbW = addKnob("rvb_width", "WIDTH", "", 0);
-    rvbW->textFromValueFunction = [](double v) { return juce::String((int)(v * 100.0)) + "%"; };
+    rvbW->textFromValueFunction = pctText;
     rvbM = addKnob("rvb_mix", "MIX", "", 0);
-    rvbM->textFromValueFunction = [](double v) { return juce::String((int)(v * 100.0)) + "%"; };
+    rvbM->textFromValueFunction = pctText;
     rvbP = addKnob("rvb_predelay", "PRE-DELAY", " ms", 0);
 
     limC = addKnob("lim_ceiling", "CEILING", " dB", 1);
     limA = addKnob("lim_attack", "ATTACK", " ms", 1);
     limR = addKnob("lim_release", "RELEASE", " ms", 0);
+
+    padLabel.setFont(juce::Font(juce::FontOptions(9.5f, juce::Font::bold)));
+    padLabel.setColour(juce::Label::textColourId, agm::ui::kTextDim);
+    padLabel.setJustificationType(juce::Justification::centredLeft);
+    addAndMakeVisible(padLabel);
+
+    for (int i = 0; i < (int)agm::InstrumentBank::kCount; ++i)
+        instProgramCombo.addItem(agm::InstrumentBank::programName(i), i + 1);
+    instProgramCombo.setSelectedId(1);
+    instProgramCombo.setColour(juce::ComboBox::backgroundColourId, agm::ui::kPanelHi);
+    instProgramCombo.setColour(juce::ComboBox::textColourId, agm::ui::kText);
+    instProgramCombo.setColour(juce::ComboBox::arrowColourId, agm::ui::kTextDim);
+    instProgramCombo.setColour(juce::ComboBox::outlineColourId, agm::ui::kBorder);
+    instProgramAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+        proc.getAPVTS(), "inst_program", instProgramCombo);
+    addAndMakeVisible(instProgramCombo);
+
+    instLevel = addKnob("inst_level", "LEVEL", " dB", 1);
+
+    // chromatic preview keyboard (one octave, triggers instruments via UI queue)
+    std::vector<agm::ui::PadGrid::Pad> keys;
+    static const char* noteNames[] = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
+    for (int i = 0; i < 12; ++i)
+        keys.push_back({ noteNames[i], 48 + i, juce::Colour(0xff3f7dff) });
+    padGrid.setPads(std::move(keys));
+    addAndMakeVisible(padGrid);
 
     startTimerHz(20);
 }
@@ -145,8 +186,7 @@ agm::ui::Knob* MixAgentAudioProcessorEditor::addKnob(const juce::String& id, con
 
 juce::ToggleButton* MixAgentAudioProcessorEditor::addPower(const juce::String& id)
 {
-    auto* t = powerToggles.add(new juce::ToggleButton());
-    styleToggle(*t, "");
+    auto* t = powerToggles.add(new agm::ui::PowerToggle());
     buttonAttachments.add(new juce::AudioProcessorValueTreeState::ButtonAttachment(proc.getAPVTS(), id, *t));
     addAndMakeVisible(t);
     return t;
@@ -154,30 +194,21 @@ juce::ToggleButton* MixAgentAudioProcessorEditor::addPower(const juce::String& i
 
 juce::ToggleButton* MixAgentAudioProcessorEditor::addToggle(const juce::String& id, const juce::String& text)
 {
-    auto* t = new juce::ToggleButton();
-    styleToggle(*t, text);
+    auto* t = new agm::ui::PowerToggle(text);
     buttonAttachments.add(new juce::AudioProcessorValueTreeState::ButtonAttachment(proc.getAPVTS(), id, *t));
     addAndMakeVisible(t);
     return t;
 }
 
-void MixAgentAudioProcessorEditor::styleToggle(juce::ToggleButton& t, const juce::String& text)
-{
-    t.setButtonText(text);
-    t.setColour(juce::ToggleButton::tickColourId, agm::ui::kAccent);
-    t.setColour(juce::ToggleButton::tickDisabledColourId, agm::ui::kBorder);
-    t.setColour(juce::ToggleButton::textColourId, agm::ui::kTextDim);
-}
-
-void MixAgentAudioProcessorEditor::placeKnobs(float centreX, int y, const juce::Array<agm::ui::Knob*>& ks)
+void MixAgentAudioProcessorEditor::placeKnobs(float centreX, int y, const juce::Array<agm::ui::Knob*>& ks, int w, int h)
 {
     const int gap = 4;
-    const int totalW = ks.size() * 50 + ((int)ks.size() - 1) * gap;
-    int x = (int)centreX - totalW / 2;
+    const int totalW = ks.size() * w + ((int)ks.size() - 1) * gap;
+    int x = juce::roundToInt(centreX) - totalW / 2;
     for (auto* k : ks)
     {
-        k->setBounds(x, y, 50, 72);
-        x += 50 + gap;
+        k->setBounds(x, y, w, h);
+        x += w + gap;
     }
 }
 
@@ -186,6 +217,9 @@ void MixAgentAudioProcessorEditor::drawHeader(juce::Graphics& g, juce::Rectangle
     g.setColour(agm::ui::kTextDim);
     g.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
     g.drawText(name, r.getX() + 10, r.getY() + 3, r.getWidth() - 20, 20, juce::Justification::centredLeft);
+    const float w = (float)g.getCurrentFont().getStringWidth(name);
+    g.setColour(agm::ui::kAccent);
+    g.fillRect(juce::Rectangle<float>((float)(r.getX() + 10), (float)(r.getY() + 24), w, 1.5f));
 }
 
 void MixAgentAudioProcessorEditor::paint(juce::Graphics& g)
@@ -198,6 +232,7 @@ void MixAgentAudioProcessorEditor::paint(juce::Graphics& g)
         g.fillRoundedRectangle(r.toFloat(), 6.0f);
         g.setColour(agm::ui::kBorder);
         g.drawRoundedRectangle(r.toFloat().reduced(0.5f), 6.0f, 1.0f);
+        g.setColour(agm::ui::kBorder.withAlpha(0.6f));
         g.drawHorizontalLine(r.getY() + 27, (float)r.getX() + 8.0f, (float)r.getRight() - 8.0f);
     };
 
@@ -206,6 +241,11 @@ void MixAgentAudioProcessorEditor::paint(juce::Graphics& g)
     for (auto& p : panels)
         panelPaint(p);
 
+    g.setColour(agm::ui::kPanel);
+    g.fillRoundedRectangle(drumRect.toFloat(), 6.0f);
+    g.setColour(agm::ui::kBorder);
+    g.drawRoundedRectangle(drumRect.toFloat().reduced(0.5f), 6.0f, 1.0f);
+
     drawHeader(g, eqSection, "EQUALIZER");
     drawHeader(g, panels[0], "SATURATION");
     drawHeader(g, panels[1], "COMPRESSOR");
@@ -213,6 +253,16 @@ void MixAgentAudioProcessorEditor::paint(juce::Graphics& g)
     drawHeader(g, panels[3], "DELAY");
     drawHeader(g, panels[4], "REVERB");
     drawHeader(g, panels[5], "LIMITER");
+    drawHeader(g, drumRect, "INSTRUMENT LIBRARY");
+
+    const auto combo = satModeCombo.getBounds();
+    if (combo.getHeight() > 0)
+    {
+        g.setColour(agm::ui::kTextDim);
+        g.setFont(juce::Font(juce::FontOptions(8.5f, juce::Font::bold)));
+        g.drawText("MODE", combo.withHeight(12).withY(combo.getY() - 14),
+                   juce::Justification::centred, false);
+    }
 }
 
 void MixAgentAudioProcessorEditor::resized()
@@ -222,31 +272,35 @@ void MixAgentAudioProcessorEditor::resized()
     r.removeFromTop(10);
     eqSection = r.removeFromTop(230);
     r.removeFromTop(10);
+    const auto drumRow = r.removeFromBottom(150);
+    r.removeFromTop(10);
     modulesRow = r;
+    drumRect = drumRow;
 
     auto t = topBarRect.reduced(14, 0);
     logoLabel.setBounds(t.removeFromLeft(220).withY(topBarRect.getY() + 4).withHeight(36));
     subLabel.setBounds(t.removeFromLeft(190).withY(topBarRect.getY() + 18).withHeight(14));
 
-    presetCombo.setBounds(t.removeFromRight(170).withSizeKeepingCentre(170, 24));
-    t.removeFromRight(14);
+    presetCombo.setBounds(t.removeFromRight(170).withSizeKeepingCentre(170, 26));
+    t.removeFromRight(16);
     outLabel.setBounds(t.removeFromRight(30).withSizeKeepingCentre(30, 12));
     outMeter.setBounds(t.removeFromRight(14).withSizeKeepingCentre(14, 36));
-    t.removeFromRight(12);
+    t.removeFromRight(10);
     inLabel.setBounds(t.removeFromRight(30).withSizeKeepingCentre(30, 12));
     inMeter.setBounds(t.removeFromRight(14).withSizeKeepingCentre(14, 36));
 
-    powerToggles[0]->setBounds(eqSection.getRight() - 28, eqSection.getY() + 6, 18, 16);
+    powerToggles[0]->setBounds(eqSection.getRight() - 30, eqSection.getY() + 7, 18, 16);
 
-    spectrum.setBounds(eqSection.getX() + 10, eqSection.getY() + 32, eqSection.getWidth() - 20, 96);
+    spectrum.setBounds(eqSection.getX() + 10, eqSection.getY() + 32, eqSection.getWidth() - 20, 98);
 
     const int knobY = eqSection.getY() + 138;
     const float cw = (float)eqSection.getWidth() / 7.0f;
     auto cx = [&](int i) { return eqSection.getX() + (i + 0.5f) * cw; };
-    hpToggle->setBounds((int)cx(0) - 49, knobY + 24, 42, 20);
+
     hpKnob->setBounds((int)cx(0) - 2, knobY, 50, 72);
-    lpToggle->setBounds((int)cx(6) - 49, knobY + 24, 42, 20);
+    hpToggle->setBounds((int)cx(0) - 56, knobY + 27, 48, 18);
     lpKnob->setBounds((int)cx(6) - 2, knobY, 50, 72);
+    lpToggle->setBounds((int)cx(6) - 56, knobY + 27, 48, 18);
     placeKnobs(cx(1), knobY, { lsfF, lsfG });
     placeKnobs(cx(2), knobY, { p1F, p1G, p1Q });
     placeKnobs(cx(3), knobY, { p2F, p2G, p2Q });
@@ -264,37 +318,53 @@ void MixAgentAudioProcessorEditor::resized()
         px += widths[i] + panelGap;
     }
     for (int i = 0; i < 6; ++i)
-        powerToggles[i + 1]->setBounds(panels[i].getRight() - 28, panels[i].getY() + 6, 18, 16);
+        powerToggles[i + 1]->setBounds(panels[i].getRight() - 26, panels[i].getY() + 7, 18, 16);
 
-    const int row1 = panelY + 36;
-    const int row2 = row1 + 74;
-    const int row3 = row2 + 74;
+    const int kw = 54, kh = 78;
+    const int row1 = panelY + 34;
+    const int row2 = row1 + 105;
+    const int row3 = row2 + 105;
+    const int contentH = panelH - 34 - 10;
 
-    placeKnobs(panels[0].getCentreX(), row1, { satDrive, satMix, satOut });
-    satModeCombo.setBounds(panels[0].getX() + 30, row2 + 22, panels[0].getWidth() - 60, 22);
+    {
+        const int blockH = kh + 32 + 26;
+        const int sy = row1 + (contentH - blockH) / 2;
+        placeKnobs(panels[0].getCentreX(), sy, { satDrive, satMix, satOut }, kw, kh);
+        satModeCombo.setBounds(panels[0].getX() + 26, sy + kh + 32, panels[0].getWidth() - 52, 26);
+    }
 
-    auto compArea = panels[1].withTrimmedRight(30);
-    compMeter.setBounds(panels[1].getRight() - 22, row1, 14, panels[1].getBottom() - row1 - 14);
-    placeKnobs(compArea.getCentreX(), row1, { compT, compR, compA });
-    placeKnobs(compArea.getCentreX(), row2, { compRel, compK, compMix });
-    placeKnobs(compArea.getCentreX(), row3, { compMake });
+    auto compArea = panels[1].withTrimmedRight(32);
+    compMeter.setBounds(panels[1].getRight() - 28, row1, 20, contentH);
+    placeKnobs(compArea.getCentreX(), row1, { compT, compR, compA }, kw, kh);
+    placeKnobs(compArea.getCentreX(), row2, { compRel, compK, compMix }, kw, kh);
+    placeKnobs(compArea.getCentreX(), row3, { compMake }, kw, kh);
 
-    placeKnobs(panels[2].getCentreX(), row1, { imgW, imgB });
-    monoToggle->setBounds(panels[2].getCentreX() - 30, row2 + 24, 60, 20);
+    {
+        const int blockH = kh + 16 + 20;
+        const int iy = row1 + (contentH - blockH) / 2;
+        placeKnobs(panels[2].getCentreX(), iy, { imgW, imgB }, kw, kh);
+        monoToggle->setBounds(panels[2].getCentreX() - 32, iy + kh + 16, 64, 20);
+    }
 
-    placeKnobs(panels[3].getCentreX(), row1, { dlyT, dlyF });
-    placeKnobs(panels[3].getCentreX(), row2, { dlyM, dlyD });
-    placeKnobs(panels[3].getCentreX(), row3, { dlyW });
+    placeKnobs(panels[3].getCentreX(), row1, { dlyT, dlyF }, kw, kh);
+    placeKnobs(panels[3].getCentreX(), row2, { dlyM, dlyD }, kw, kh);
+    placeKnobs(panels[3].getCentreX(), row3, { dlyW }, kw, kh);
 
-    placeKnobs(panels[4].getCentreX(), row1, { rvbS, rvbDc });
-    placeKnobs(panels[4].getCentreX(), row2, { rvbD, rvbW });
-    placeKnobs(panels[4].getCentreX(), row3, { rvbM, rvbP });
+    placeKnobs(panels[4].getCentreX(), row1, { rvbS, rvbDc }, kw, kh);
+    placeKnobs(panels[4].getCentreX(), row2, { rvbD, rvbW }, kw, kh);
+    placeKnobs(panels[4].getCentreX(), row3, { rvbM, rvbP }, kw, kh);
 
-    auto limArea = panels[5].withTrimmedRight(30);
-    limMeter.setBounds(panels[5].getRight() - 22, row1, 14, panels[5].getBottom() - row1 - 14);
-    placeKnobs(limArea.getCentreX(), row1, { limC });
-    placeKnobs(limArea.getCentreX(), row2, { limA });
-    placeKnobs(limArea.getCentreX(), row3, { limR });
+    auto limArea = panels[5].withTrimmedRight(32);
+    limMeter.setBounds(panels[5].getRight() - 28, row1, 20, contentH);
+    placeKnobs(limArea.getCentreX(), row1, { limC }, kw, kh);
+    placeKnobs(limArea.getCentreX(), row2, { limA }, kw, kh);
+    placeKnobs(limArea.getCentreX(), row3, { limR }, kw, kh);
+
+    powerToggles[7]->setBounds(drumRow.getX(), drumRow.getY() + 4, 18, 16);
+    padLabel.setBounds(drumRow.getX() + 24, drumRow.getY() + 6, 120, 16);
+    instProgramCombo.setBounds(drumRow.getX() + 150, drumRow.getY() + 4, 130, 22);
+    instLevel->setBounds(drumRow.getX() + 290, drumRow.getY(), 54, 40);
+    padGrid.setBounds(drumRow.withTrimmedTop(34).reduced(8, 6));
 }
 
 void MixAgentAudioProcessorEditor::timerCallback()
@@ -303,6 +373,7 @@ void MixAgentAudioProcessorEditor::timerCallback()
     outMeter.setLevel(proc.getOutLevel(0), proc.getOutLevel(1));
     compMeter.setGrDb(proc.getCompGrDb());
     limMeter.setGrDb(proc.getLimGrDb());
+
     float spec[600];
     float curve[600];
     proc.getAnalyzerSpectrum(spec, 600);

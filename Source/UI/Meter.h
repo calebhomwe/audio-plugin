@@ -16,43 +16,60 @@ public:
 
     void setLevel(float l, float r)
     {
-        const juce::int64 nowMs = juce::Time::currentTimeMillis();
-        levelL_.store(juce::jlimit(0.0f, 1.0f, l));
-        levelR_.store(juce::jlimit(0.0f, 1.0f, r));
-        if (l >= 1.0f) clipLTimeMs_.store(nowMs);
-        if (r >= 1.0f) clipRTimeMs_.store(nowMs);
-        lastPeakTimeMs_.store(nowMs);
+        const juce::int64 now = juce::Time::currentTimeMillis();
+        targetL_.store(juce::jlimit(0.0f, 1.0f, l));
+        targetR_.store(juce::jlimit(0.0f, 1.0f, r));
+        if (l >= 1.0f) clipLTimeMs_.store(now);
+        if (r >= 1.0f) clipRTimeMs_.store(now);
         repaint();
     }
 
     void setGrDb(float db)
     {
-        grDb_.store(juce::jlimit(0.0f, 24.0f, db));
+        grTarget_.store(juce::jlimit(0.0f, kGrRange, db));
         repaint();
     }
 
     void paint(juce::Graphics& g) override
     {
-        g.setColour(kPanelHi);
-        g.fillRoundedRectangle(getLocalBounds().toFloat(), 4.0f);
+        const auto bounds = getLocalBounds().toFloat();
+        g.setColour(kBg);
+        g.fillRoundedRectangle(bounds, 3.0f);
+        g.setColour(kBorder);
+        g.drawRoundedRectangle(bounds.reduced(0.5f), 3.0f, 1.0f);
+
+        const juce::int64 nowMs = juce::Time::currentTimeMillis();
+        const float dt = juce::jlimit(0.0f, 0.25f, (float)(nowMs - lastPaintMs_) * 0.001f);
+        lastPaintMs_ = nowMs;
 
         if (kind_ == Kind::Level)
-            paintLevel(g);
+            paintLevel(g, dt, nowMs);
         else
-            paintGr(g);
+            paintGr(g, dt);
     }
 
     void resized() override
     {
-        rebuildLevelLayout();
+        if (kind_ != Kind::Level)
+            return;
+
+        const auto area = getLocalBounds().reduced(2);
+        const int w = juce::jmax(1, (area.getWidth() - 2) / 2);
+        barL_ = juce::Rectangle<int>(area.getX(), area.getY(), w, area.getHeight());
+        barR_ = juce::Rectangle<int>(area.getX() + w + 2, area.getY(),
+                                     juce::jmax(1, area.getWidth() - w - 2), area.getHeight());
+
+        gradientLevel_ = juce::ColourGradient(kMeterLo, 0.0f, (float)area.getBottom(),
+                                              kMeterClip, 0.0f, (float)area.getY(), false);
+        gradientLevel_.addColour(0.62, kMeterHi);
     }
 
 private:
+    static constexpr float kGrRange = 24.0f;
+
     static float gainToDb(float gain)
     {
-        if (gain <= 0.0f)
-            return -60.0f;
-        return juce::jmax(-60.0f, 20.0f * std::log10(gain));
+        return gain <= 0.0f ? -60.0f : juce::jmax(-60.0f, 20.0f * std::log10(gain));
     }
 
     static float dbToGain(float db)
@@ -65,139 +82,136 @@ private:
         return juce::jlimit(0.0f, 1.0f, 1.0f + gainToDb(level) / 60.0f);
     }
 
-    static void decayPeak(float& peak, float level, float dt)
+    static float approach(float current, float target, float dt, float tauMs)
     {
-        if (level > peak)
-            peak = level;
-        if (peak <= level)
-            return;
-
-        const float peakDb = gainToDb(peak);
-        const float levelDb = gainToDb(level);
-        const float decayed = peakDb - 1.2f * dt;
-        if (decayed <= levelDb + 0.05f)
-        {
-            peak = level;
-            return;
-        }
-        peak = dbToGain(decayed);
+        if (dt <= 0.0f)
+            return current;
+        return current + (target - current) * (1.0f - std::exp(-dt * 1000.0f / tauMs));
     }
 
-    void rebuildLevelLayout()
+    static void updatePeak(float& peak, juce::int64& holdMs, float level, float dt, juce::int64 nowMs)
     {
-        if (kind_ != Kind::Level)
+        if (level >= peak)
+        {
+            peak = level;
+            holdMs = nowMs;
             return;
-
-        const juce::Rectangle<int> area = getLocalBounds().reduced(2);
-        const int w = juce::jmax(1, (area.getWidth() - 2) / 2);
-        barL_ = juce::Rectangle<int>(area.getX(), area.getY(), w, area.getHeight());
-        barR_ = juce::Rectangle<int>(area.getX() + w + 2, area.getY(), w, area.getHeight());
-
-        const float top = static_cast<float>(area.getY());
-        const float bottom = static_cast<float>(area.getBottom());
-        gradientLevel_ = juce::ColourGradient(kMeterLo, 0.0f, bottom, kMeterClip, 0.0f, top, false);
-        gradientLevel_.addColour(0.66, kMeterHi);
+        }
+        if (nowMs - holdMs < 600)
+            return;
+        const float db = gainToDb(peak) - 28.0f * dt;
+        peak = juce::jmax(level, dbToGain(db));
     }
 
-    void paintLevel(juce::Graphics& g)
+    void paintLevel(juce::Graphics& g, float dt, juce::int64 nowMs)
     {
-        const float l = levelL_.load();
-        const float r = levelR_.load();
+        const float tl = targetL_.load();
+        const float tr = targetR_.load();
+        dispL_ = approach(dispL_, tl, dt, tl > dispL_ ? 15.0f : 90.0f);
+        dispR_ = approach(dispR_, tr, dt, tr > dispR_ ? 15.0f : 90.0f);
+        updatePeak(peakL_, peakHoldL_, tl, dt, nowMs);
+        updatePeak(peakR_, peakHoldR_, tr, dt, nowMs);
 
-        const juce::int64 nowMs = juce::Time::currentTimeMillis();
-        const float dt = juce::jlimit(0.0f, 1.0f, static_cast<float>(nowMs - lastPeakTimeMs_.load()) / 1000.0f);
-        if (dt > 0.0f)
-        {
-            decayPeak(peakL_, l, dt);
-            decayPeak(peakR_, r, dt);
-            lastPeakTimeMs_.store(nowMs);
-        }
+        const bool flashL = nowMs - clipLTimeMs_.load() < 1500;
+        const bool flashR = nowMs - clipRTimeMs_.load() < 1500;
 
-        const bool flashL = (nowMs - clipLTimeMs_.load()) < 1500;
-        const bool flashR = (nowMs - clipRTimeMs_.load()) < 1500;
+        drawLevelBar(g, barL_, dispL_, peakL_, flashL);
+        drawLevelBar(g, barR_, dispR_, peakR_, flashR);
 
-        drawLevelBar(g, barL_, l, peakL_, flashL);
-        drawLevelBar(g, barR_, r, peakR_, flashR);
-
-        if (peakL_ > l || peakR_ > r || flashL || flashR)
+        if (std::abs(dispL_ - tl) > 0.003f || std::abs(dispR_ - tr) > 0.003f ||
+            peakL_ > tl + 0.002f || peakR_ > tr + 0.002f || flashL || flashR)
             repaint();
     }
 
     void drawLevelBar(juce::Graphics& g, const juce::Rectangle<int>& bar, float level, float peak, bool clipFlash)
     {
-        if (bar.getWidth() < 1 || bar.getHeight() < 1)
+        if (bar.getWidth() < 1 || bar.getHeight() < 2)
             return;
 
-        if (gradientLevel_.getNumColours() >= 2)
+        const int fillH = juce::jlimit(0, bar.getHeight(),
+                                       juce::roundToInt(levelFraction(level) * (float)bar.getHeight()));
+        if (fillH > 0)
         {
-            const int fillH = juce::jlimit(0, bar.getHeight(), juce::roundToInt(levelFraction(level) * static_cast<float>(bar.getHeight())));
-            if (fillH > 0)
-            {
-                const juce::Rectangle<float> fill(static_cast<float>(bar.getX()),
-                                                  static_cast<float>(bar.getBottom() - fillH),
-                                                  static_cast<float>(bar.getWidth()),
-                                                  static_cast<float>(fillH));
-                g.setGradientFill(gradientLevel_);
-                g.fillRect(fill);
-            }
+            g.setGradientFill(gradientLevel_);
+            g.fillRect(juce::Rectangle<float>((float)bar.getX(), (float)(bar.getBottom() - fillH),
+                                              (float)bar.getWidth(), (float)fillH));
         }
 
         const float pf = levelFraction(peak);
-        if (pf > 0.0f)
+        if (pf > 0.02f)
         {
-            const float y = static_cast<float>(bar.getBottom()) - pf * static_cast<float>(bar.getHeight());
-            const float lineY = juce::jmax(static_cast<float>(bar.getY()) + 0.75f, y - 0.75f);
+            const float y = juce::jmax((float)bar.getY(),
+                                       (float)bar.getBottom() - pf * (float)bar.getHeight() - 1.5f);
             g.setColour(kText);
-            g.fillRect(juce::Rectangle<float>(static_cast<float>(bar.getX()), lineY,
-                                              static_cast<float>(bar.getWidth()), 1.5f));
+            g.fillRect(juce::Rectangle<float>((float)bar.getX(), y, (float)bar.getWidth(), 1.5f));
         }
 
         if (clipFlash)
         {
-            const float topH = juce::jmin(3.0f, static_cast<float>(bar.getHeight()));
             g.setColour(kMeterClip);
-            g.fillRect(juce::Rectangle<float>(static_cast<float>(bar.getX()), static_cast<float>(bar.getY()),
-                                              static_cast<float>(bar.getWidth()), topH));
+            g.fillRect(juce::Rectangle<float>((float)bar.getX(), (float)bar.getY(),
+                                              (float)bar.getWidth(),
+                                              juce::jmin(3.0f, (float)bar.getHeight())));
         }
     }
 
-    void paintGr(juce::Graphics& g)
+    void paintGr(juce::Graphics& g, float dt)
     {
-        juce::Rectangle<int> area = getLocalBounds().reduced(2);
-        const juce::Rectangle<int> textRect = area.removeFromBottom(juce::jmax(0, juce::jmin(10, area.getHeight() - 2)));
+        auto area = getLocalBounds().reduced(3);
+        const auto textRect = area.removeFromBottom(juce::jlimit(0, 12, area.getHeight() / 5));
 
-        const float frac = juce::jlimit(0.0f, 1.0f, grDb_.load() / 24.0f);
-        const int fillH = juce::jlimit(0, area.getHeight(), juce::roundToInt(frac * static_cast<float>(area.getHeight())));
-        if (fillH > 0)
+        const float target = grTarget_.load();
+        grDisp_ = approach(grDisp_, target, dt, target > grDisp_ ? 20.0f : 140.0f);
+        if (grDisp_ < 0.05f)
+            grDisp_ = 0.0f;
+
+        if (!area.isEmpty())
         {
-            g.setColour(kAccent);
-            g.fillRect(area.getX(), area.getY(), area.getWidth(), fillH);
+            g.setColour(kBorder);
+            for (int i = 1; i <= 3; ++i)
+            {
+                const float y = (float)area.getY() + (float)area.getHeight() * ((float)i * 6.0f / kGrRange);
+                g.drawHorizontalLine(juce::roundToInt(y), (float)area.getX(), (float)area.getRight());
+            }
+
+            const float frac = juce::jlimit(0.0f, 1.0f, grDisp_ / kGrRange);
+            const int fillH = juce::roundToInt(frac * (float)area.getHeight());
+            if (fillH > 0)
+            {
+                g.setGradientFill(juce::ColourGradient(kMeterHi, 0.0f, (float)area.getY(),
+                                                       kMeterClip, 0.0f, (float)area.getBottom(), false));
+                g.fillRect(juce::Rectangle<float>((float)area.getX(), (float)area.getY(),
+                                                  (float)area.getWidth(), (float)fillH));
+            }
         }
 
         if (!textRect.isEmpty())
         {
-            g.setColour(kTextDim);
-            g.setFont(juce::FontOptions().withHeight(9.0f));
-            g.drawText(grLabel_, textRect, juce::Justification::centred, false);
+            const bool showValue = grDisp_ >= 0.5f && textRect.getWidth() >= 14;
+            g.setColour(showValue ? kText : kTextDim);
+            g.setFont(juce::Font(juce::FontOptions(8.0f)));
+            g.drawText(showValue ? juce::String(-(int)(grDisp_ + 0.5f)) : juce::String("GR"),
+                       textRect, juce::Justification::centred, false);
         }
+
+        if (std::abs(grDisp_ - target) > 0.02f)
+            repaint();
     }
 
     Kind kind_;
-    std::atomic<float> levelL_{0.0f};
-    std::atomic<float> levelR_{0.0f};
-    std::atomic<float> grDb_{0.0f};
-
-    float peakL_ = 0.0f;
-    float peakR_ = 0.0f;
-
-    std::atomic<juce::int64> lastPeakTimeMs_{0};
+    std::atomic<float> targetL_{0.0f};
+    std::atomic<float> targetR_{0.0f};
+    std::atomic<float> grTarget_{0.0f};
     std::atomic<juce::int64> clipLTimeMs_{0};
     std::atomic<juce::int64> clipRTimeMs_{0};
 
-    juce::Rectangle<int> barL_;
-    juce::Rectangle<int> barR_;
+    float dispL_ = 0.0f, dispR_ = 0.0f, grDisp_ = 0.0f;
+    float peakL_ = 0.0f, peakR_ = 0.0f;
+    juce::int64 peakHoldL_ = 0, peakHoldR_ = 0;
+    juce::int64 lastPaintMs_ = 0;
+
+    juce::Rectangle<int> barL_, barR_;
     juce::ColourGradient gradientLevel_;
-    juce::String grLabel_{"GR"};
 };
 
 } // namespace ui

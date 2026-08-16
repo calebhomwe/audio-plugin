@@ -1,0 +1,4 @@
+@echo off
+call "C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64 >nul
+"C:\Program Files\CMake\bin\cmake.exe" -G "Visual Studio 18 2026" -A x64 -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=OFF -DFETCHCONTENT_FULLY_DISCONNECTED=ON -DFETCHCONTENT_SOURCE_DIR_JUCE="C:\Users\code\Documents\Default Project\build\_deps\juce-src" -S "C:\Users\code\Documents\Default Project" -B "C:\Users\code\Documents\Default Project\buildDrum" 2>&1
+"C:\Program Files\CMake\bin\cmake.exe" --build "C:\Users\code\Documents\Default Project\buildDrum" --config Debug --target MixAgentSmokeTest 2>&1

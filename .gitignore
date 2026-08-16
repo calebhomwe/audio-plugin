@@ -1,7 +1,14 @@
 build/
+buildDrum/
+buildP1/
+buildP2/
+buildP3/
+buildP4/
 .vs/
 *.user
 games/
 index.html
 repos/
 reverb_runtime.obj
+smoke_err.txt
+smoke_out.txt

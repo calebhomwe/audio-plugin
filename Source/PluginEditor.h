@@ -5,6 +5,7 @@
 #include "UI/Knob.h"
 #include "UI/Meter.h"
 #include "UI/Spectrum.h"
+#include "UI/PadGrid.h"
 
 class MixAgentAudioProcessorEditor : public juce::AudioProcessorEditor, public juce::Timer
 {
@@ -21,8 +22,7 @@ private:
                            const juce::String& suffix = {}, int decimals = 1);
     juce::ToggleButton* addPower(const juce::String& id);
     juce::ToggleButton* addToggle(const juce::String& id, const juce::String& text);
-    void styleToggle(juce::ToggleButton& t, const juce::String& text);
-    void placeKnobs(float centreX, int y, const juce::Array<agm::ui::Knob*>& ks);
+    void placeKnobs(float centreX, int y, const juce::Array<agm::ui::Knob*>& ks, int w = 50, int h = 72);
     void drawHeader(juce::Graphics& g, juce::Rectangle<int> r, const char* name);
 
     MixAgentAudioProcessor& proc;
@@ -36,6 +36,14 @@ private:
     agm::ui::Meter compMeter { agm::ui::Meter::Kind::GainReduction };
     agm::ui::Meter limMeter { agm::ui::Meter::Kind::GainReduction };
     juce::ComboBox satModeCombo;
+    agm::ui::PadGrid padGrid { [this](int note) { proc.uiNoteOn(note, 0.9f); },
+                               [this](int note) { proc.uiNoteOff(note); },
+                               [this] { return proc.getInstrumentActive(); } };
+    juce::Label padLabel { {}, "DRUM MACHINE / 808 - MOUSE OR MIDI" };
+    juce::ComboBox instProgramCombo;
+    agm::ui::Knob* instLevel = nullptr;
+    juce::ToggleButton* instPower = nullptr;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> instProgramAttachment;
 
     juce::OwnedArray<juce::ToggleButton> powerToggles;
     juce::OwnedArray<agm::ui::Knob> knobs;
@@ -43,7 +51,7 @@ private:
     juce::OwnedArray<juce::AudioProcessorValueTreeState::ButtonAttachment> buttonAttachments;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> satModeAttachment;
 
-    juce::Rectangle<int> topBarRect, eqSection, modulesRow;
+    juce::Rectangle<int> topBarRect, eqSection, modulesRow, drumRect;
     juce::Rectangle<int> panels[6];
 
     juce::ToggleButton* hpToggle = nullptr;
