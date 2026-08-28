@@ -22,7 +22,7 @@ int main()
         {
             edPtr->setBounds(0, 0, 1160, 920);
             juce::Image img = edPtr->createComponentSnapshot(juce::Rectangle<int>(0, 0, 1160, 920));
-            juce::File out("C:\\Users\\code\\AppData\\Local\\Temp\\mixagent_probe.png");
+            juce::File out("C:\\Users\\code\\AppData\\Local\\Temp\\mixagent_ui_v2.png");
             {
                 juce::FileOutputStream fos(out);
                 juce::PNGImageFormat pf;

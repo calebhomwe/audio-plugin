@@ -21,8 +21,8 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
     for (int i = 0; i < proc.getNumPrograms(); ++i)
         presetCombo.addItem(proc.getProgramName(i), i + 1);
     presetCombo.setSelectedId(1);
-    presetCombo.setColour(juce::ComboBox::backgroundColourId, agm::ui::kPanelHi);
-    presetCombo.setColour(juce::ComboBox::textColourId, agm::ui::kText);
+    presetCombo.setColour(juce::ComboBox::backgroundColourId, juce::Colour(0xff0a0a0d));
+    presetCombo.setColour(juce::ComboBox::textColourId, agm::ui::kAccentHot);
     presetCombo.setColour(juce::ComboBox::arrowColourId, agm::ui::kTextDim);
     presetCombo.setColour(juce::ComboBox::outlineColourId, agm::ui::kBorder);
     presetCombo.onChange = [this] { proc.setCurrentProgram(presetCombo.getSelectedItemIndex()); };
@@ -149,8 +149,8 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
      for (int i = 0; i < (int)agm::InstrumentBank::kCount; ++i)
         instProgramCombo.addItem(agm::InstrumentBank::programName(i), i + 1);
     instProgramCombo.setSelectedId(1);
-    instProgramCombo.setColour(juce::ComboBox::backgroundColourId, agm::ui::kPanelHi);
-    instProgramCombo.setColour(juce::ComboBox::textColourId, agm::ui::kText);
+    instProgramCombo.setColour(juce::ComboBox::backgroundColourId, juce::Colour(0xff0a0a0d));
+    instProgramCombo.setColour(juce::ComboBox::textColourId, agm::ui::kAccentHot);
     instProgramCombo.setColour(juce::ComboBox::arrowColourId, agm::ui::kTextDim);
     instProgramCombo.setColour(juce::ComboBox::outlineColourId, agm::ui::kBorder);
     instProgramAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
@@ -171,8 +171,8 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
     instFilterCombo.addItem("KEYS/LEAD", 3);
     instFilterCombo.addItem("BASS", 4);
     instFilterCombo.setSelectedId(1);
-    instFilterCombo.setColour(juce::ComboBox::backgroundColourId, agm::ui::kPanelHi);
-    instFilterCombo.setColour(juce::ComboBox::textColourId, agm::ui::kText);
+    instFilterCombo.setColour(juce::ComboBox::backgroundColourId, juce::Colour(0xff0a0a0d));
+    instFilterCombo.setColour(juce::ComboBox::textColourId, agm::ui::kAccentHot);
     instFilterCombo.setColour(juce::ComboBox::arrowColourId, agm::ui::kTextDim);
     instFilterCombo.setColour(juce::ComboBox::outlineColourId, agm::ui::kBorder);
     instFilterCombo.onChange = [this] { updateProgramList(); };
@@ -466,9 +466,9 @@ void MixAgentAudioProcessorEditor::resized()
     powerToggles[7]->setBounds(drumRow.getX() + 10, drumRow.getY() + 6, 18, 16);
     instProgramCombo.setBounds(drumRow.getX() + 210, drumRow.getY() + 4, 110, 22);
     instFilterCombo.setBounds(drumRow.getX() + 326, drumRow.getY() + 4, 76, 22);
-    favToggle.setBounds(drumRow.getX() + 408, drumRow.getY() + 2, 44, 26);
-    instLevel->setBounds(drumRow.getX() + 460, drumRow.getY() + 2, 54, 64);
-    padLabel.setBounds(drumRow.getX() + 524, drumRow.getY() + 7, drumRow.getWidth() - 534, 16);
+    favToggle.setBounds(drumRow.getX() + 408, drumRow.getY() + 2, 58, 26);
+    instLevel->setBounds(drumRow.getX() + 474, drumRow.getY() + 2, 54, 64);
+    padLabel.setBounds(drumRow.getX() + 538, drumRow.getY() + 7, drumRow.getWidth() - 548, 16);
     padGrid.setBounds(drumRow.withTrimmedTop(72).reduced(8, 6));
 }
 
