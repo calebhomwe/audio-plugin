@@ -14,14 +14,14 @@ int main()
                                 juce::DocumentWindow::allButtons, false);
         dw.setContentOwned(ed.release(), false);
         dw.setUsingNativeTitleBar(false);
-        dw.setBounds(0, 0, 1160, 900);
+        dw.setBounds(0, 0, 1160, 920);
         dw.setVisible(true);
 
         auto* edPtr = dw.getContentComponent();
         if (edPtr != nullptr)
         {
-            edPtr->setBounds(0, 0, 1160, 900);
-            juce::Image img = edPtr->createComponentSnapshot(juce::Rectangle<int>(0, 0, 1160, 900));
+            edPtr->setBounds(0, 0, 1160, 920);
+            juce::Image img = edPtr->createComponentSnapshot(juce::Rectangle<int>(0, 0, 1160, 920));
             juce::File out("C:\\Users\\code\\AppData\\Local\\Temp\\mixagent_probe.png");
             {
                 juce::FileOutputStream fos(out);

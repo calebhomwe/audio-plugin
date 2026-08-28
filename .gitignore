@@ -22,3 +22,5 @@ Qwen3.8-27B_Colab.ipynb
 _probe.html
 _geoprobe.html
 .opencode/node_modules/
+
+tools/godot/

@@ -152,3 +152,5 @@ Back-to-back improvement passes on the single-file HTML5 games in games/. One li
 - Passes 39/40 (isle-of-bells): features WERE in external .js; harness claims unverifiable — FIXED: scripts inlined, single-file restored, harness green frames=240.
 - Harness: CanvasRenderingContext2D, getComputedStyle, firstChild-lazy, insertAdjacentHTML(append) stubs added.
 
+145. word-scramble.html — golden letter tile collectible (30% of words >=3 letters, persisted total + milestones) (harness ok frames=0, syntax ok)
+146. word-scramble.html — CLEAN RUN streak (no hint/shuffle/skip/wrong per word; persisted best, x5 floaters, start/over lines) (harness ok frames=0, syntax ok)

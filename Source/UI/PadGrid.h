@@ -28,7 +28,19 @@ public:
     {
         pads = std::move(p);
         heldPads.resize(pads.size(), false);
+        flash.assign(pads.size(), 0.0f);
         repaint();
+    }
+
+    void tick()
+    {
+        bool any = false;
+        for (auto& f : flash)
+        {
+            if (f > 0.01f) { f *= 0.80f; any = true; }
+            else f = 0.0f;
+        }
+        if (any) repaint();
     }
 
     void mouseDown(const juce::MouseEvent& e) override
@@ -37,6 +49,7 @@ public:
         if (idx >= 0)
         {
             heldPads[(size_t)idx] = true;
+            flash[(size_t)idx] = 1.0f;
             fireDown(pads[idx].note);
             repaint();
         }
@@ -83,7 +96,8 @@ public:
 
             const bool held = heldPads[(size_t)i];
             const bool audio = audioActive ? audioActive() : false;
-            const bool lit = held || audio;
+            const float fl = (size_t)i < flash.size() ? flash[(size_t)i] : 0.0f;
+            const bool lit = held || audio || fl > 0.05f;
             const juce::Colour col = pads[i].colour;
             const juce::Rectangle<float> rf = rct.toFloat();
             const float cr = 7.0f;
@@ -121,6 +135,14 @@ public:
             g.setColour(juce::Colours::white.withAlpha(lit ? 0.26f : 0.13f));
             g.fillRect(rf.getX() + cr, rf.getY() + 1.5f,
                        juce::jmax(0.0f, rf.getWidth() - cr * 2.0f), 1.0f);
+
+            if (fl > 0.02f)
+            {
+                g.setColour(col.withAlpha(0.5f * fl));
+                g.fillRoundedRectangle(rf.expanded(3.0f), cr + 2.0f);
+                g.setColour(juce::Colours::white.withAlpha(0.35f * fl));
+                g.fillRoundedRectangle(face.reduced(1.0f), cr);
+            }
 
             int note = pads[i].note;
             if (note >= 24 && note <= 48)
@@ -172,6 +194,7 @@ private:
     std::function<bool()> audioActive;
     std::vector<Pad> pads;
     std::vector<bool> heldPads;
+    std::vector<float> flash;
 };
 
 }} // namespace agm::ui

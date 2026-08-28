@@ -4,9 +4,9 @@
 MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcessor& p)
     : AudioProcessorEditor(p), proc(p)
 {
-    setSize(1160, 900);
+    setSize(1160, 920);
 
-    logoLabel.setText("MIXAGENT", juce::dontSendNotification);
+    logoLabel.setText("", juce::dontSendNotification);
     logoLabel.setFont(juce::Font(juce::FontOptions(24.0f, juce::Font::bold)));
     logoLabel.setColour(juce::Label::textColourId, agm::ui::kText);
     logoLabel.setJustificationType(juce::Justification::centredLeft);
@@ -140,9 +140,10 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
     limA = addKnob("lim_attack", "ATTACK", " ms", 1);
     limR = addKnob("lim_release", "RELEASE", " ms", 0);
 
-    padLabel.setFont(juce::Font(juce::FontOptions(9.5f, juce::Font::bold)));
+    padLabel.setFont(juce::Font(juce::FontOptions(9.0f, juce::Font::bold)));
     padLabel.setColour(juce::Label::textColourId, agm::ui::kTextDim);
-    padLabel.setJustificationType(juce::Justification::centredLeft);
+    padLabel.setJustificationType(juce::Justification::centredRight);
+    padLabel.setText("16 INSTRUMENTS - MIDI OR MOUSE", juce::dontSendNotification);
     addAndMakeVisible(padLabel);
 
      for (int i = 0; i < (int)agm::InstrumentBank::kCount; ++i)
@@ -302,11 +303,26 @@ void MixAgentAudioProcessorEditor::paint(juce::Graphics& g)
         panelPaint(p);
 
     {
+        const juce::String logo = "MIXAGENT";
+        g.setFont(juce::Font(juce::FontOptions(24.0f, juce::Font::bold)));
+        const auto lr = topBarRect.reduced(14, 0).withWidth(220).withY(topBarRect.getY() + 4).withHeight(36);
+        g.setColour(juce::Colours::black.withAlpha(0.85f));
+        g.drawText(logo, lr.translated(1, 1), juce::Justification::centredLeft, false);
+        g.setColour(juce::Colour(0xff3a3a44).withAlpha(0.6f));
+        g.drawText(logo, lr.translated(-1, -1), juce::Justification::centredLeft, false);
+        g.setColour(agm::ui::kText);
+        g.drawText(logo, lr, juce::Justification::centredLeft, false);
+    }
+
+    {
         auto dr = drumRect.toFloat();
         const float corner = 6.0f;
         g.setGradientFill(agm::ui::verticalFade(dr, agm::ui::kPanelHi, agm::ui::kPanel));
         g.fillRoundedRectangle(dr, corner);
         g.setColour(agm::ui::kAccent.withAlpha(0.06f));
+        g.fillRoundedRectangle(dr, corner);
+        g.setGradientFill(juce::ColourGradient(agm::ui::kCyan.withAlpha(0.07f), dr.getX(), dr.getY(),
+                                               agm::ui::kCyan.withAlpha(0.0f), dr.getX(), dr.getY() + 70.0f, false));
         g.fillRoundedRectangle(dr, corner);
         g.setColour(agm::ui::kBorder);
         g.drawRoundedRectangle(dr.reduced(0.5f), corner, 1.0f);
@@ -330,10 +346,10 @@ void MixAgentAudioProcessorEditor::paint(juce::Graphics& g)
         const char* name = "INSTRUMENT LIBRARY";
         g.setColour(agm::ui::kAccentHot);
         g.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
-        g.drawText(name, drumRect.getX() + 10, drumRect.getY() + 3, drumRect.getWidth() - 20, 20,
+        g.drawText(name, drumRect.getX() + 34, drumRect.getY() + 3, drumRect.getWidth() - 44, 20,
                    juce::Justification::centredLeft);
         const float w = (float)g.getCurrentFont().getStringWidth(name);
-        const float ux = (float)(drumRect.getX() + 10);
+        const float ux = (float)(drumRect.getX() + 34);
         const float uy = (float)(drumRect.getY() + 24);
         g.setGradientFill(juce::ColourGradient(agm::ui::kAccent, ux, uy,
                                                agm::ui::kAccent.withAlpha(0.0f), ux + w + 34.0f, uy, false));
@@ -359,7 +375,7 @@ void MixAgentAudioProcessorEditor::resized()
     r.removeFromTop(10);
     eqSection = r.removeFromTop(230);
     r.removeFromTop(10);
-    const auto drumRow = r.removeFromBottom(150);
+    const auto drumRow = r.removeFromBottom(170);
     r.removeFromTop(10);
     modulesRow = r;
     drumRect = drumRow;
@@ -447,13 +463,13 @@ void MixAgentAudioProcessorEditor::resized()
     placeKnobs(limArea.getCentreX(), row2, { limA }, kw, kh);
     placeKnobs(limArea.getCentreX(), row3, { limR }, kw, kh);
 
-    powerToggles[7]->setBounds(drumRow.getX(), drumRow.getY() + 4, 18, 16);
-    padLabel.setBounds(drumRow.getX() + 24, drumRow.getY() + 6, 120, 16);
-    instProgramCombo.setBounds(drumRow.getX() + 150, drumRow.getY() + 4, 110, 22);
-    instFilterCombo.setBounds(drumRow.getX() + 266, drumRow.getY() + 4, 76, 22);
-    favToggle.setBounds(drumRow.getX() + 346, drumRow.getY() + 2, 44, 26);
-    instLevel->setBounds(drumRow.getX() + 396, drumRow.getY(), 54, 40);
-    padGrid.setBounds(drumRow.withTrimmedTop(34).reduced(8, 6));
+    powerToggles[7]->setBounds(drumRow.getX() + 10, drumRow.getY() + 6, 18, 16);
+    instProgramCombo.setBounds(drumRow.getX() + 210, drumRow.getY() + 4, 110, 22);
+    instFilterCombo.setBounds(drumRow.getX() + 326, drumRow.getY() + 4, 76, 22);
+    favToggle.setBounds(drumRow.getX() + 408, drumRow.getY() + 2, 44, 26);
+    instLevel->setBounds(drumRow.getX() + 460, drumRow.getY() + 2, 54, 64);
+    padLabel.setBounds(drumRow.getX() + 524, drumRow.getY() + 7, drumRow.getWidth() - 534, 16);
+    padGrid.setBounds(drumRow.withTrimmedTop(72).reduced(8, 6));
 }
 
 void MixAgentAudioProcessorEditor::timerCallback()
@@ -470,6 +486,7 @@ void MixAgentAudioProcessorEditor::timerCallback()
     spectrum.setSpectrum(spec, 600);
     spectrum.setEqCurve(curve, 600);
     spectrum.repaint();
+    padGrid.tick();
 
     if (auditionTimerRemaining > 0)
     {
