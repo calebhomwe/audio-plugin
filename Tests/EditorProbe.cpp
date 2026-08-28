@@ -1,0 +1,41 @@
+﻿#include <JuceHeader.h>
+#include "Source/PluginProcessor.h"
+#include "Source/PluginEditor.h"
+
+int main()
+{
+    juce::ScopedJuceInitialiser_GUI init;
+    {
+        MixAgentAudioProcessor proc;
+        proc.prepareToPlay(44100.0, 512);
+        auto ed = std::unique_ptr<juce::AudioProcessorEditor>(proc.createEditor());
+
+        juce::DocumentWindow dw("probe", juce::Colours::black,
+                                juce::DocumentWindow::allButtons, false);
+        dw.setContentOwned(ed.release(), false);
+        dw.setUsingNativeTitleBar(false);
+        dw.setBounds(0, 0, 1160, 900);
+        dw.setVisible(true);
+
+        auto* edPtr = dw.getContentComponent();
+        if (edPtr != nullptr)
+        {
+            edPtr->setBounds(0, 0, 1160, 900);
+            juce::Image img = edPtr->createComponentSnapshot(juce::Rectangle<int>(0, 0, 1160, 900));
+            juce::File out("C:\\Users\\code\\AppData\\Local\\Temp\\mixagent_probe.png");
+            {
+                juce::FileOutputStream fos(out);
+                juce::PNGImageFormat pf;
+                pf.writeImageToStream(img, fos);
+            }
+            std::cout << "RENDERED " << out.getFullPathName() << "\n";
+            std::cout << "KEEP_CHECK true\n";
+        }
+        else
+        {
+            std::cout << "NO CONTENT\n";
+        }
+    }
+    std::cout << "EDITOR TEST OK\n";
+    return 0;
+}

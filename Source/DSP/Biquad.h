@@ -6,7 +6,7 @@ namespace agm {
 class Biquad
 {
 public:
-    void prepare(double sampleRate) { fs = sampleRate > 1.0 ? sampleRate : 44100.0; }
+    void prepare(double sampleRate) { fs = sampleRate > 1.0 ? sampleRate : 44100.0; reset(); }
     void reset() { x1 = x2 = y1 = y2 = 0.0f; }
 
     float process(float x)

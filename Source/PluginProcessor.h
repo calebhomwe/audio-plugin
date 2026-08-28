@@ -38,7 +38,6 @@ public:
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
 
-    int getLatencySamples() const { return limiter.getLatencySamples(); }
     bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
 
     juce::AudioProcessorValueTreeState& getAPVTS() { return apvts; }
@@ -50,10 +49,12 @@ public:
     float getOutLevel(int ch) const;
     float getCompGrDb() const { return compressor.getGainReductionDb(); }
     float getLimGrDb() const { return limiter.getGainReductionDb(); }
-    bool getDrumActive() const { return drumEngine.isActive(); }
     bool getInstrumentActive() const { return instruments.isActive(); }
     int getInstrumentProgram() const { return instruments.getProgram(); }
     void setInstrumentProgram(int p) { instruments.setProgram(p); }
+    bool isFavorite(int program) const;
+    void setFavorite(int program, bool fav);
+    int getFavoriteCount() const;
     juce::StringArray skipModules;
 
     // UI-driven triggers (message thread safe; drained on the audio thread)
@@ -82,7 +83,7 @@ private:
     float inGainSmoothed = 1.0f, outGainSmoothed = 1.0f;
     double sampleRate = 44100.0;
     int currentProgram = 0;
-    static constexpr int kPresetCount = 6;
+    static constexpr int kPresetCount = 12;
 
     std::atomic<float> inLevelL { 0.0f }, inLevelR { 0.0f };
     std::atomic<float> outLevelL { 0.0f }, outLevelR { 0.0f };

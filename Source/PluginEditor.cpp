@@ -1,10 +1,10 @@
-#include "PluginProcessor.h"
+﻿#include "PluginProcessor.h"
 #include "PluginEditor.h"
 
 MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcessor& p)
     : AudioProcessorEditor(p), proc(p)
 {
-    setSize(1160, 790);
+    setSize(1160, 900);
 
     logoLabel.setText("MIXAGENT", juce::dontSendNotification);
     logoLabel.setFont(juce::Font(juce::FontOptions(24.0f, juce::Font::bold)));
@@ -145,7 +145,7 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
     padLabel.setJustificationType(juce::Justification::centredLeft);
     addAndMakeVisible(padLabel);
 
-    for (int i = 0; i < (int)agm::InstrumentBank::kCount; ++i)
+     for (int i = 0; i < (int)agm::InstrumentBank::kCount; ++i)
         instProgramCombo.addItem(agm::InstrumentBank::programName(i), i + 1);
     instProgramCombo.setSelectedId(1);
     instProgramCombo.setColour(juce::ComboBox::backgroundColourId, agm::ui::kPanelHi);
@@ -154,7 +154,32 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
     instProgramCombo.setColour(juce::ComboBox::outlineColourId, agm::ui::kBorder);
     instProgramAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         proc.getAPVTS(), "inst_program", instProgramCombo);
+    instProgramCombo.onChange = [this]
+    {
+        // audition: fire a middle-C pluck so the program is heard instantly
+        proc.uiNoteOn(60, 0.85f);
+        auditionTimerRemaining = 30; // noteOff after ~300ms (timer ticks at 20Hz)
+        const int item = instProgramCombo.getSelectedId();
+        if (item >= 1 && item <= (int)agm::InstrumentBank::kCount)
+            favToggle.setToggleState(proc.isFavorite(item - 1), juce::dontSendNotification);
+    };
     addAndMakeVisible(instProgramCombo);
+
+    instFilterCombo.addItem("ALL", 1);
+    instFilterCombo.addItem("FAVORITES", 2);
+    instFilterCombo.addItem("KEYS/LEAD", 3);
+    instFilterCombo.addItem("BASS", 4);
+    instFilterCombo.setSelectedId(1);
+    instFilterCombo.setColour(juce::ComboBox::backgroundColourId, agm::ui::kPanelHi);
+    instFilterCombo.setColour(juce::ComboBox::textColourId, agm::ui::kText);
+    instFilterCombo.setColour(juce::ComboBox::arrowColourId, agm::ui::kTextDim);
+    instFilterCombo.setColour(juce::ComboBox::outlineColourId, agm::ui::kBorder);
+    instFilterCombo.onChange = [this] { updateProgramList(); };
+    addAndMakeVisible(instFilterCombo);
+
+    favToggle.setColour(juce::ToggleButton::textColourId, agm::ui::kAccent);
+    favToggle.onClick = [this] { onClickFav(); };
+    addAndMakeVisible(favToggle);
 
     instLevel = addKnob("inst_level", "LEVEL", " dB", 1);
 
@@ -162,11 +187,13 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
     std::vector<agm::ui::PadGrid::Pad> keys;
     static const char* noteNames[] = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
     for (int i = 0; i < 12; ++i)
-        keys.push_back({ noteNames[i], 48 + i, juce::Colour(0xff3f7dff) });
+        keys.push_back({ noteNames[i], 48 + i, juce::Colour(0xff2f7dff) });
     padGrid.setPads(std::move(keys));
     addAndMakeVisible(padGrid);
 
     startTimerHz(20);
+    fullyBuilt = true;
+    resized();
 }
 
 agm::ui::Knob* MixAgentAudioProcessorEditor::addKnob(const juce::String& id, const juce::String& label,
@@ -200,6 +227,37 @@ juce::ToggleButton* MixAgentAudioProcessorEditor::addToggle(const juce::String& 
     return t;
 }
 
+void MixAgentAudioProcessorEditor::updateProgramList()
+{
+    const int filter = instFilterCombo.getSelectedId();
+    const int currentId = instProgramCombo.getSelectedId();
+    instProgramCombo.clear(juce::dontSendNotification);
+
+    for (int i = 0; i < (int)agm::InstrumentBank::kCount; ++i)
+    {
+        const juce::String cat = agm::InstrumentBank::programCategory(i);
+        const bool matchesFav = (filter != 2) || proc.isFavorite(i);
+        const bool matchesCat = (filter != 3 || cat == "Keys/Lead") && (filter != 4 || cat == "Bass");
+        if (matchesFav && matchesCat)
+            instProgramCombo.addItem(agm::InstrumentBank::programName(i), i + 1);
+    }
+    instProgramCombo.setSelectedId(juce::jmax(currentId, 1), juce::dontSendNotification);
+
+    const int item = instProgramCombo.getSelectedId();
+    if (item >= 1 && item <= (int)agm::InstrumentBank::kCount)
+        favToggle.setToggleState(proc.isFavorite(item - 1), juce::dontSendNotification);
+}
+
+void MixAgentAudioProcessorEditor::onClickFav()
+{
+    const int item = instProgramCombo.getSelectedId();
+    if (item < 1 || item > (int)agm::InstrumentBank::kCount)
+        return;
+    const bool nowFav = !proc.isFavorite(item - 1);
+    proc.setFavorite(item - 1, nowFav);
+    updateProgramList();
+}
+
 void MixAgentAudioProcessorEditor::placeKnobs(float centreX, int y, const juce::Array<agm::ui::Knob*>& ks, int w, int h)
 {
     const int gap = 4;
@@ -218,20 +276,22 @@ void MixAgentAudioProcessorEditor::drawHeader(juce::Graphics& g, juce::Rectangle
     g.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
     g.drawText(name, r.getX() + 10, r.getY() + 3, r.getWidth() - 20, 20, juce::Justification::centredLeft);
     const float w = (float)g.getCurrentFont().getStringWidth(name);
-    g.setColour(agm::ui::kAccent);
-    g.fillRect(juce::Rectangle<float>((float)(r.getX() + 10), (float)(r.getY() + 24), w, 1.5f));
+    const float ux = (float)(r.getX() + 10);
+    const float uy = (float)(r.getY() + 24);
+    g.setGradientFill(juce::ColourGradient(agm::ui::kAccent, ux, uy,
+                                           agm::ui::kAccent.withAlpha(0.0f), ux + w + 34.0f, uy, false));
+    g.fillRect(ux, uy, w + 34.0f, 2.0f);
 }
 
 void MixAgentAudioProcessorEditor::paint(juce::Graphics& g)
 {
-    g.fillAll(agm::ui::kBg);
+    g.setGradientFill(agm::ui::verticalFade(getLocalBounds().toFloat(),
+                                            juce::Colour(0xff0c0c10), juce::Colour(0xff131318)));
+    g.fillAll();
 
     auto panelPaint = [&](juce::Rectangle<int> r)
     {
-        g.setColour(agm::ui::kPanel);
-        g.fillRoundedRectangle(r.toFloat(), 6.0f);
-        g.setColour(agm::ui::kBorder);
-        g.drawRoundedRectangle(r.toFloat().reduced(0.5f), 6.0f, 1.0f);
+        agm::ui::panelBevel(g, r.toFloat(), 6.0f);
         g.setColour(agm::ui::kBorder.withAlpha(0.6f));
         g.drawHorizontalLine(r.getY() + 27, (float)r.getX() + 8.0f, (float)r.getRight() - 8.0f);
     };
@@ -241,10 +301,22 @@ void MixAgentAudioProcessorEditor::paint(juce::Graphics& g)
     for (auto& p : panels)
         panelPaint(p);
 
-    g.setColour(agm::ui::kPanel);
-    g.fillRoundedRectangle(drumRect.toFloat(), 6.0f);
-    g.setColour(agm::ui::kBorder);
-    g.drawRoundedRectangle(drumRect.toFloat().reduced(0.5f), 6.0f, 1.0f);
+    {
+        auto dr = drumRect.toFloat();
+        const float corner = 6.0f;
+        g.setGradientFill(agm::ui::verticalFade(dr, agm::ui::kPanelHi, agm::ui::kPanel));
+        g.fillRoundedRectangle(dr, corner);
+        g.setColour(agm::ui::kAccent.withAlpha(0.06f));
+        g.fillRoundedRectangle(dr, corner);
+        g.setColour(agm::ui::kBorder);
+        g.drawRoundedRectangle(dr.reduced(0.5f), corner, 1.0f);
+        g.setColour(juce::Colours::white.withAlpha(0.22f));
+        g.fillRect(dr.getX() + corner, dr.getY() + 0.5f,
+                   juce::jmax(0.0f, dr.getWidth() - corner * 2.0f), 1.0f);
+        g.setColour(agm::ui::kCyan);
+        g.fillRect(dr.getX() + corner, dr.getY() + 1.5f,
+                   juce::jmax(0.0f, dr.getWidth() - corner * 2.0f), 1.0f);
+    }
 
     drawHeader(g, eqSection, "EQUALIZER");
     drawHeader(g, panels[0], "SATURATION");
@@ -253,7 +325,20 @@ void MixAgentAudioProcessorEditor::paint(juce::Graphics& g)
     drawHeader(g, panels[3], "DELAY");
     drawHeader(g, panels[4], "REVERB");
     drawHeader(g, panels[5], "LIMITER");
-    drawHeader(g, drumRect, "INSTRUMENT LIBRARY");
+
+    {
+        const char* name = "INSTRUMENT LIBRARY";
+        g.setColour(agm::ui::kAccentHot);
+        g.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
+        g.drawText(name, drumRect.getX() + 10, drumRect.getY() + 3, drumRect.getWidth() - 20, 20,
+                   juce::Justification::centredLeft);
+        const float w = (float)g.getCurrentFont().getStringWidth(name);
+        const float ux = (float)(drumRect.getX() + 10);
+        const float uy = (float)(drumRect.getY() + 24);
+        g.setGradientFill(juce::ColourGradient(agm::ui::kAccent, ux, uy,
+                                               agm::ui::kAccent.withAlpha(0.0f), ux + w + 34.0f, uy, false));
+        g.fillRect(ux, uy, w + 34.0f, 2.0f);
+    }
 
     const auto combo = satModeCombo.getBounds();
     if (combo.getHeight() > 0)
@@ -267,6 +352,8 @@ void MixAgentAudioProcessorEditor::paint(juce::Graphics& g)
 
 void MixAgentAudioProcessorEditor::resized()
 {
+    if (!fullyBuilt)
+        return;
     auto r = getLocalBounds().reduced(agm::ui::kMargin);
     topBarRect = r.removeFromTop(44);
     r.removeFromTop(10);
@@ -362,8 +449,10 @@ void MixAgentAudioProcessorEditor::resized()
 
     powerToggles[7]->setBounds(drumRow.getX(), drumRow.getY() + 4, 18, 16);
     padLabel.setBounds(drumRow.getX() + 24, drumRow.getY() + 6, 120, 16);
-    instProgramCombo.setBounds(drumRow.getX() + 150, drumRow.getY() + 4, 130, 22);
-    instLevel->setBounds(drumRow.getX() + 290, drumRow.getY(), 54, 40);
+    instProgramCombo.setBounds(drumRow.getX() + 150, drumRow.getY() + 4, 110, 22);
+    instFilterCombo.setBounds(drumRow.getX() + 266, drumRow.getY() + 4, 76, 22);
+    favToggle.setBounds(drumRow.getX() + 346, drumRow.getY() + 2, 44, 26);
+    instLevel->setBounds(drumRow.getX() + 396, drumRow.getY(), 54, 40);
     padGrid.setBounds(drumRow.withTrimmedTop(34).reduced(8, 6));
 }
 
@@ -381,4 +470,12 @@ void MixAgentAudioProcessorEditor::timerCallback()
     spectrum.setSpectrum(spec, 600);
     spectrum.setEqCurve(curve, 600);
     spectrum.repaint();
+
+    if (auditionTimerRemaining > 0)
+    {
+        if (--auditionTimerRemaining == 0)
+            proc.uiNoteOff(60);
+    }
 }
+
+

@@ -128,22 +128,33 @@ private:
         if (bar.getWidth() < 1 || bar.getHeight() < 2)
             return;
 
-        const int fillH = juce::jlimit(0, bar.getHeight(),
-                                       juce::roundToInt(levelFraction(level) * (float)bar.getHeight()));
+        constexpr float segH = 4.0f;
+        constexpr float pitch = 5.0f;
+        const float fillF = levelFraction(level) * (float)bar.getHeight();
+        int fillH = juce::jlimit(0, bar.getHeight(), juce::roundToInt(fillF));
         if (fillH > 0)
         {
             g.setGradientFill(gradientLevel_);
-            g.fillRect(juce::Rectangle<float>((float)bar.getX(), (float)(bar.getBottom() - fillH),
-                                              (float)bar.getWidth(), (float)fillH));
+            int remaining = fillH;
+            float yTop = (float)bar.getBottom() - (float)fillH;
+            while (remaining > 0)
+            {
+                const float h = juce::jmin(segH, (float)remaining);
+                g.fillRoundedRectangle(juce::Rectangle<float>((float)bar.getX(), yTop,
+                                                              (float)bar.getWidth(), h), 1.5f);
+                yTop += pitch;
+                remaining -= (int)pitch;
+            }
         }
 
         const float pf = levelFraction(peak);
         if (pf > 0.02f)
         {
             const float y = juce::jmax((float)bar.getY(),
-                                       (float)bar.getBottom() - pf * (float)bar.getHeight() - 1.5f);
-            g.setColour(kText);
-            g.fillRect(juce::Rectangle<float>((float)bar.getX(), y, (float)bar.getWidth(), 1.5f));
+                                       (float)bar.getBottom() - pf * (float)bar.getHeight() - 2.0f);
+            g.setColour(kText.withAlpha(0.8f));
+            g.fillRoundedRectangle(juce::Rectangle<float>((float)bar.getX(), y,
+                                                          (float)bar.getWidth(), 2.0f), 1.0f);
         }
 
         if (clipFlash)
@@ -167,21 +178,29 @@ private:
 
         if (!area.isEmpty())
         {
-            g.setColour(kBorder);
-            for (int i = 1; i <= 3; ++i)
+            const float frac = juce::jlimit(0.0f, 1.0f, grDisp_ / kGrRange);
+            const float barW = juce::jmin(3.0f, (float)area.getWidth());
+            const float x = (float)area.getX() + ((float)area.getWidth() - barW) * 0.5f;
+            const float fillH = frac * (float)area.getHeight();
+
+            if (fillH > 0.0f)
             {
-                const float y = (float)area.getY() + (float)area.getHeight() * ((float)i * 6.0f / kGrRange);
-                g.drawHorizontalLine(juce::roundToInt(y), (float)area.getX(), (float)area.getRight());
+                g.setColour(kAccent.withAlpha(0.18f));
+                g.fillRoundedRectangle(juce::Rectangle<float>(x - 2.0f, (float)area.getY(),
+                                                              barW + 4.0f,
+                                                              juce::jmax(fillH, barW)), 1.5f);
+
+                g.setColour(kAccent);
+                g.fillRect(juce::Rectangle<float>(x, (float)area.getY(), barW, fillH));
             }
 
-            const float frac = juce::jlimit(0.0f, 1.0f, grDisp_ / kGrRange);
-            const int fillH = juce::roundToInt(frac * (float)area.getHeight());
-            if (fillH > 0)
+            const int ticks = juce::jmin(3, juce::roundToInt((float)area.getHeight() / kGrRange));
+            for (int i = 1; i <= ticks; ++i)
             {
-                g.setGradientFill(juce::ColourGradient(kMeterHi, 0.0f, (float)area.getY(),
-                                                       kMeterClip, 0.0f, (float)area.getBottom(), false));
-                g.fillRect(juce::Rectangle<float>((float)area.getX(), (float)area.getY(),
-                                                  (float)area.getWidth(), (float)fillH));
+                const float y = (float)area.getY() + (float)area.getHeight()
+                              * ((float)i * 6.0f / kGrRange);
+                g.setColour(kBorder.withAlpha(0.35f));
+                g.drawHorizontalLine(juce::roundToInt(y), x + barW + 2.0f, (float)area.getRight());
             }
         }
 

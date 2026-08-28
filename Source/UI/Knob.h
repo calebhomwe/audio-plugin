@@ -39,6 +39,37 @@ public:
         const float thickness = juce::jmax(2.5f, side * 0.075f);
         const juce::PathStrokeType stroke(thickness, juce::PathStrokeType::curved, juce::PathStrokeType::rounded);
 
+        const juce::Colour accentTop(hot ? 0xffffc07a : 0xffffa640);
+        const juce::Colour accentBottom(hot ? 0xffff8b3d : 0xffff6b1a);
+        const juce::Colour glowTint(0x33ff6b1a);
+        const juce::Colour faceLight(hot ? 0xff36363f : 0xff33333d);
+        const juce::Colour faceDark(hot ? 0xff1c1c22 : 0xff16161c);
+
+        const float sinV = std::sin(valueAngle);
+        const float cosV = std::cos(valueAngle);
+
+        const float discR = juce::jmax(4.0f, radius - thickness * 0.5f - 1.5f);
+        {
+            juce::ColourGradient face(faceLight,
+                                      centre.getX() - discR * 0.45f, centre.getY() - discR * 0.45f,
+                                      faceDark,
+                                      centre.getX() + discR * 0.35f, centre.getY() + discR * 0.35f,
+                                      true);
+            g.setFillType(juce::FillType(face));
+            g.fillEllipse(centre.getX() - discR, centre.getY() - discR, discR * 2.0f, discR * 2.0f);
+            g.setColour(kBorder.brighter(hot ? 0.12f : 0.0f));
+            g.drawEllipse(centre.getX() - discR, centre.getY() - discR, discR * 2.0f, discR * 2.0f, 1.0f);
+        }
+
+        g.setColour(kTextDim.withAlpha(0.30f));
+        for (int i = 0; i < 5; ++i)
+        {
+            const float a = arcOffset + (float)i / 4.0f * (endAngle - startAngle);
+            const float sn = std::sin(a), cs = std::cos(a);
+            g.drawLine(centre.getX() + cs * (discR - 4.0f), centre.getY() - sn * (discR - 4.0f),
+                       centre.getX() + cs * (discR - 1.5f), centre.getY() - sn * (discR - 1.5f), 1.0f);
+        }
+
         juce::Path track;
         track.addCentredArc(centre.getX(), centre.getY(), radius, radius, 0.0f,
                             arcOffset, arcOffset + (endAngle - startAngle), true);
@@ -50,29 +81,43 @@ public:
             juce::Path value;
             value.addCentredArc(centre.getX(), centre.getY(), radius, radius, 0.0f,
                                 arcOffset, arcOffset + (valueAngle - startAngle), true);
-            g.setColour(hot ? kAccent.brighter(0.3f) : kAccent);
-            g.strokePath(value, stroke);
+
+            const juce::PathStrokeType glowStroke(thickness + 2.0f,
+                                                  juce::PathStrokeType::curved,
+                                                  juce::PathStrokeType::rounded);
+            g.setColour(glowTint);
+            g.strokePath(value, glowStroke);
+
+            {
+                juce::ColourGradient fill(accentTop,
+                                          centre.getX(), centre.getY() - radius,
+                                          accentBottom,
+                                          centre.getX(), centre.getY() + radius,
+                                          false);
+                g.setFillType(juce::FillType(fill));
+                g.strokePath(value, stroke);
+            }
         }
 
-        const float capR = radius * 0.62f;
-        g.setColour(hot ? kPanelHi.brighter(0.2f) : kPanelHi);
-        g.fillEllipse(centre.getX() - capR, centre.getY() - capR, capR * 2.0f, capR * 2.0f);
-        g.setColour(kBorder);
-        g.drawEllipse(centre.getX() - capR, centre.getY() - capR, capR * 2.0f, capR * 2.0f, 1.0f);
-
-        const float sinA = std::sin(valueAngle);
-        const float cosA = std::cos(valueAngle);
-        g.setColour(hot ? kText : kTextDim);
-        g.drawLine(centre.getX() + sinA * capR * 0.3f, centre.getY() - cosA * capR * 0.3f,
-                   centre.getX() + sinA * capR * 0.9f, centre.getY() - cosA * capR * 0.9f,
-                   juce::jmax(1.5f, side * 0.04f));
+        {
+            juce::Path needle;
+            needle.startNewSubPath(centre.getX() + sinV * discR * 0.18f, centre.getY() - cosV * discR * 0.18f);
+            needle.lineTo(centre.getX() + sinV * discR * 0.88f, centre.getY() - cosV * discR * 0.88f);
+            juce::Path stroked;
+            juce::PathStrokeType(2.0f, juce::PathStrokeType::beveled,
+                                 juce::PathStrokeType::rounded).createStrokedPath(stroked, needle);
+            g.setColour(kText);
+            g.fillPath(stroked);
+        }
 
         auto textArea = bounds.withTrimmedTop(side).reduced(1.0f, 0.0f);
         g.setColour(kTextDim);
-        drawFitted(g, label_, textArea.removeFromTop(textArea.getHeight() * 0.45f),
-                   juce::FontOptions(9.5f, juce::Font::bold));
+        drawFitted(g, label_.toUpperCase(),
+                   textArea.removeFromTop(textArea.getHeight() * 0.45f),
+                   juce::FontOptions(8.5f));
         g.setColour(kText);
-        drawFitted(g, getTextFromValue(getValue()) + suffix_, textArea, juce::FontOptions(11.0f));
+        drawFitted(g, getTextFromValue(getValue()) + suffix_, textArea,
+                   juce::FontOptions(10.5f, juce::Font::bold));
     }
 
 private:

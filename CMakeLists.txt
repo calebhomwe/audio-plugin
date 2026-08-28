@@ -52,3 +52,20 @@ target_link_libraries(MixAgentSmokeTest PRIVATE
     juce::juce_gui_basics
     juce::juce_gui_extra
     juce::juce_audio_devices)
+
+juce_add_console_app(EditorProbe)
+juce_generate_juce_header(EditorProbe)
+target_sources(EditorProbe PRIVATE
+    Tests/EditorProbe.cpp
+    ${AGM_SOURCES})
+target_compile_features(EditorProbe PRIVATE cxx_std_17)
+target_include_directories(EditorProbe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(EditorProbe PRIVATE
+    juce::juce_dsp)
+target_link_libraries(EditorProbe PRIVATE
+    juce::juce_audio_basics
+    juce::juce_audio_processors
+    juce::juce_audio_utils
+    juce::juce_gui_basics
+    juce::juce_gui_extra
+    juce::juce_audio_devices)

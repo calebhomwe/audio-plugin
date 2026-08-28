@@ -78,16 +78,17 @@ private:
         static const float majorFreqs[] = { 100.0f, 1000.0f, 10000.0f };
         static const float minorFreqs[] = { 30.0f, 300.0f, 3000.0f };
 
-        g.setColour(kBorder.withAlpha(0.4f));
+        g.setColour(kBorder.withAlpha(0.14f));
         for (float f : minorFreqs)
         {
             const float x = plot.getX() + freqToX(f, plot.getWidth());
             g.drawVerticalLine(juce::roundToInt(x), plot.getY(), plot.getBottom());
         }
 
-        g.setColour(kBorder);
+        g.setColour(kBorder.withAlpha(0.35f));
         for (float db : dbLines)
         {
+            if (db == 0.0f) continue;
             const float y = plot.getY() + dbToY(db, plot.getHeight());
             g.drawHorizontalLine(juce::roundToInt(y), plot.getX(), plot.getRight());
         }
@@ -96,6 +97,10 @@ private:
             const float x = plot.getX() + freqToX(f, plot.getWidth());
             g.drawVerticalLine(juce::roundToInt(x), plot.getY(), plot.getBottom());
         }
+
+        const float y0 = plot.getY() + dbToY(0.0f, plot.getHeight());
+        g.setColour(kBorder.withAlpha(0.55f));
+        g.drawHorizontalLine(juce::roundToInt(y0), plot.getX(), plot.getRight());
     }
 
     void drawLabels(juce::Graphics& g, const juce::Rectangle<float>& plot)
@@ -148,12 +153,14 @@ private:
         filled.lineTo(plot.getX(), plot.getBottom());
         filled.closeSubPath();
 
-        g.setGradientFill(juce::ColourGradient(kAccent.withAlpha(0.38f), 0.0f, plot.getY(),
-                                               kAccent.withAlpha(0.03f), 0.0f, plot.getBottom(), false));
+        g.setGradientFill(juce::ColourGradient(kAccent.withAlpha(0.30f), 0.0f, plot.getY(),
+                                               kAccent.withAlpha(0.02f), 0.0f, plot.getBottom(), false));
         g.fillPath(filled);
 
+        g.setColour(kAccent.withAlpha(0.18f));
+        g.strokePath(curve, juce::PathStrokeType(4.0f));
         g.setColour(kAccent);
-        g.strokePath(curve, juce::PathStrokeType(1.4f));
+        g.strokePath(curve, juce::PathStrokeType(1.5f));
     }
 
     void drawCurve(juce::Graphics& g, const juce::Rectangle<float>& plot)
@@ -162,9 +169,7 @@ private:
         if (path.isEmpty())
             return;
 
-        g.setColour(kText.withAlpha(0.22f));
-        g.strokePath(path, juce::PathStrokeType(3.5f));
-        g.setColour(kText);
+        g.setColour(kCyan);
         g.strokePath(path, juce::PathStrokeType(1.5f));
     }
 

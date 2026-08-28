@@ -2,37 +2,28 @@
 #include <juce_dsp/juce_dsp.h>
 #include <cmath>
 #include <array>
-#include <vector>
+#include <algorithm>
 
 namespace agm {
 
 // Multi-timbral instrument library (Nexus-style), fully DSP-synthesized so
 // every factory sound is owned and license-clean. A "program" is a recipe
 // describing oscillators / FM / filter / ADSR; voices are polyphonic and
-// chromatic over MIDI. Programs span many sound types — NOT 808-centric.
-//
-//   Pluck   Karplus-ish decaying saw through a closing filter
-//   Bell    inharmonic FM, fast exponential decay
-//   Keys    detuned saws, soft attack, mild chorus
-//   Lead    unison saw stack, bright, sustain
-//   Pad     slow-attack detuned saws, long release
-//   Brass   saw + filter envelope, buzzy
-//   Strings sawtooth ensemble, medium attack, slight vibrato
-//   EP      FM tine, fast decay to sustain
-//   Organ   additive drawbar sines, full sustain
-//   Sub     sine bass (generic sub, not "808")
+// chromatic over MIDI.
 class InstrumentBank
 {
 public:
     enum Program : int {
-        Pluck = 0, Bell, Keys, Lead, Pad, Brass, Strings, EPiano, Organ, Sub, kCount
+        Pluck = 0, Bell, Keys, Lead, Pad, Brass, Strings, EPiano, Organ, Sub,
+        DarkBell, GlassPluck, VoxChoir, SoftSoul, BounceKeys, RageLead, kCount
     };
 
     static const char* programName(int p)
     {
         static const char* names[] = {
             "Pluck", "Bell", "Keys", "Lead", "Pad", "Brass", "Strings",
-            "E.Piano", "Organ", "Sub"
+            "E.Piano", "Organ", "Sub", "Dark Bell", "Glass Pluck", "Vox Choir",
+            "Soft Soul", "Bounce", "Rage"
         };
         return names[juce::jlimit(0, (int)kCount - 1, p)];
     }
@@ -44,20 +35,24 @@ public:
         case Pluck:   case Bell:    case Keys:    case Lead:
         case Pad:     case Brass:   case Strings: case EPiano:
         case Organ:                 return "Keys/Lead";
+        case DarkBell: case GlassPluck: case VoxChoir: case SoftSoul:
+        case BounceKeys: case RageLead:  return "Keys/Lead";
         case Sub:                   return "Bass";
         default:                    return "Misc";
         }
     }
 
-    void prepare(double sampleRate, int /*blockSize*/)
+    void prepare(double sampleRate, int blockSize)
     {
         sr = sampleRate > 1.0 ? sampleRate : 44100.0;
+        preparedBlock = juce::jmax(blockSize, 1);
         reset();
     }
 
     void reset()
     {
         for (auto& v : voices) v = Voice {};
+        voiceAge = 0;
         randState = 0x1234u;
         setProgram(currentProgram);
     }
@@ -77,22 +72,23 @@ public:
     {
         const int n = juce::jlimit(0, 127, note);
         const float vel = juce::jlimit(0.0f, 1.0f, velocity);
-        Voice& v = voiceFor();
+        Voice* target = nullptr;
+        for (auto& v : voices)
+            if (v.active && v.note == n && v.envStage != EnvStage::Release && v.envStage != EnvStage::Off)
+            { target = &v; break; }
+        Voice& v = (target != nullptr) ? *target : voiceFor();
         v = Voice {};
         v.active = true;
         v.note = n;
         v.vel = vel;
+        v.age = ++voiceAge;
         v.freq = noteToFreq(n);
-        v.oscPhase = {};
         v.envStage = EnvStage::Attack;
         v.envLevel = 0.0f;
-        v.envRate = recipe.attackRate;
-        v.filterState = 0.0f;
-        // initialise oscillator detune seeds for unison
-        for (int i = 0; i < recipe.nOsc; ++i)
+        v.envRate = 0.0f;
+        v.filterEnvLevel = 1.0f;
+        for (int i = 0; i < recipe.nOsc && i < 4; ++i)
             v.detune[i] = (float)((rand01() - 0.5) * 2.0) * recipe.detune;
-        v.modPhase = 0.0f;
-        v.chorusPhase = (float)(rand01() * 6.283185);
     }
 
     void noteOff(int note, float /*velocity*/)
@@ -109,10 +105,11 @@ public:
     void allNotesOff()
     {
         for (auto& v : voices)
-        {
-            v.envStage = EnvStage::Release;
-            v.envRate = recipe.releaseRate * 4.0f;
-        }
+            if (v.active && v.envStage != EnvStage::Off)
+            {
+                v.envStage = EnvStage::Release;
+                v.envRate = recipe.releaseRate * 4.0f;
+            }
     }
 
     bool isActive() const
@@ -125,19 +122,21 @@ public:
     {
         if (!enabled) return;
         const int num = b.getNumSamples();
-        if (num <= 0) return;
-        scratch.setSize(juce::jmax(2, numChannels), num, false, false, true);
+        if (num <= 0 || numChannels <= 0) return;
+        if (scratch.getNumSamples() < num)
+            scratch.setSize(juce::jmax(2, numChannels), num, false, false, true);
         const float outGain = juce::Decibels::decibelsToGain(levelDb) * 0.5f;
 
         for (auto& v : voices)
         {
             if (!v.active || v.envStage == EnvStage::Off) continue;
-            scratch.clear();
-            renderVoice(v, num);
+            float* const outL = scratch.getWritePointer(0);
+            float* const outR = scratch.getWritePointer(1);
+            renderVoice(v, num, outL, outR);
             for (int ch = 0; ch < numChannels; ++ch)
             {
                 float* dst = b.getWritePointer(ch);
-                const float* src = scratch.getReadPointer(ch % 2);
+                const float* src = (ch & 1) ? outR : outL;
                 for (int i = 0; i < num; ++i) dst[i] += src[i] * outGain;
             }
         }
@@ -151,14 +150,14 @@ private:
         int nOsc = 1;
         float detune = 0.0f;       // cents spread per osc
         bool saw = true;
-        bool square = false;
-        float attackRate = 0.0f;  // 1/sr-scaled rate
-        float decayRate = 0.0f;
+        bool organ = false;
+        float attackRate = 0.0f;   // 1/s
+        float decayRate = 0.0f;    // 1/s
         float sustainLevel = 1.0f;
-        float releaseRate = 0.0f;
-        float filterBase = 0.0f;   // 0..1 of nyquist
-        float filterEnv = 0.0f;     // amount the env opens/closes the filter
-        float filterDecay = 0.0f;   // env-to-filter decay rate
+        float releaseRate = 0.0f;  // 1/s
+        float filterBase = 1.0f;   // 0..1 of nyquist
+        float filterEnv = 0.0f;    // amount the env opens/closes the filter
+        float filterDecay = 0.0f;  // env-to-filter decay, 1/s
         bool fm = false;
         float modRatio = 1.0f;
         float modAmount = 0.0f;
@@ -172,15 +171,19 @@ private:
         int note = 60;
         float vel = 1.0f;
         float freq = 440.0f;
-        std::array<float, 4> oscPhase = {};
+        std::array<float, 4> oscPhase {};
+        std::array<float, 4> oscPhaseR {};
+        std::array<float, 4> detune {};
         float modPhase = 0.0f;
-        std::array<float, 4> detune = {};
         float envLevel = 0.0f;
         float envRate = 0.0f;
         EnvStage envStage = EnvStage::Off;
         float filterState = 0.0f;
+        float filterStateR = 0.0f;
         float filterEnvLevel = 1.0f;
-        float chorusPhase = 0.0f;
+        float cutLast = -1.0f;
+        float filterCoef = 0.0f;
+        uint32_t age = 0;
     };
 
     static constexpr int kVoices = 24;
@@ -189,6 +192,7 @@ private:
     Recipe recipe {};
     int currentProgram = (int)Pluck;
     double sr = 44100.0;
+    int preparedBlock = 1;
     float levelDb = 0.0f;
     bool enabled = true;
     juce::AudioBuffer<float> scratch;
@@ -207,53 +211,45 @@ private:
 
     Voice& voiceFor()
     {
-        // steal the oldest voice in release/off, else the lowest-env voice
         Voice* best = nullptr;
-        uint32_t bestAge = 0;
-        float bestEnv = 2.0f;
+        uint32_t bestAge = 0xFFFFFFFFu;
         for (auto& v : voices)
-        {
-            if (!v.active || v.envStage == EnvStage::Release || v.envStage == EnvStage::Off)
-            {
-                if (v.envLevel <= bestEnv) { bestEnv = v.envLevel; best = &v; }
-            }
-        }
-        if (best) return *best;
+            if (!v.active && v.age < bestAge) { bestAge = v.age; best = &v; }
+        if (best != nullptr) return *best;
+        bestAge = 0xFFFFFFFFu;
         for (auto& v : voices)
-            if (v.envLevel <= bestEnv) { bestEnv = v.envLevel; best = &v; }
+            if (v.envStage == EnvStage::Release && v.age < bestAge) { bestAge = v.age; best = &v; }
+        if (best != nullptr) return *best;
+        best = &voices[0];
+        float bestEnv = 1.0e9f;
+        for (auto& v : voices)
+            if (v.envLevel < bestEnv) { bestEnv = v.envLevel; best = &v; }
         return *best;
     }
 
     static float sawWave(float ph)
     {
-        float x = std::fmod(ph, 1.0f);
+        float x = ph;
+        if (x >= 1.0f) x = std::fmod(x, 1.0f);
         if (x < 0.0f) x += 1.0f;
         return 2.0f * x - 1.0f;
-    }
-
-    static float squareWave(float ph)
-    {
-        float x = std::fmod(ph, 1.0f);
-        if (x < 0.0f) x += 1.0f;
-        return x < 0.5f ? 1.0f : -1.0f;
     }
 
     static float ratePerSecToCoef(float ratePerSec, double sampleRate)
     {
         return (ratePerSec <= 0.0f) ? 1.0f
-            : (float)(1.0 - std::exp(-1.0 / (ratePerSec * sampleRate)));
+            : (float)(1.0 - std::exp(-ratePerSec / sampleRate));
     }
 
     Recipe makeRecipe(Program p)
     {
         Recipe r;
-        const double s = sr;
         switch (p)
         {
         case Pluck:
             r.nOsc = 1; r.saw = true; r.detune = 0.0f;
             r.attackRate = 1.0f / 0.001f;          // 1ms
-            r.decayRate = 1.0f / 0.45f;             // 450ms decay
+            r.decayRate = 1.0f / 0.45f;            // 450ms decay
             r.sustainLevel = 0.0f;
             r.releaseRate = 1.0f / 0.20f;
             r.filterBase = 0.08f; r.filterEnv = 0.9f; r.filterDecay = 1.0f / 0.30f;
@@ -324,7 +320,7 @@ private:
             r.gain = 0.7f;
             break;
         case Organ:
-            r.nOsc = 4; r.saw = false; r.detune = 0.0f;
+            r.nOsc = 4; r.saw = false; r.organ = true; r.detune = 0.0f;
             r.attackRate = 1.0f / 0.01f;
             r.decayRate = 1.0f / 0.2f;
             r.sustainLevel = 1.0f;
@@ -343,11 +339,10 @@ private:
             r.octaveShift = -1.0f;
             break;
         }
-        (void)s;
         return r;
     }
 
-    void renderVoice(Voice& v, int num)
+    void renderVoice(Voice& v, int num, float* outL, float* outR)
     {
         const Recipe& r = recipe;
         const float fundamental = v.freq * std::pow(2.0f, r.octaveShift);
@@ -355,10 +350,21 @@ private:
         const float modInc = phaseInc * r.modRatio;
         const float aCoef = ratePerSecToCoef(r.attackRate, sr);
         const float dCoef = ratePerSecToCoef(r.decayRate, sr);
-        const float relCoef = ratePerSecToCoef(r.releaseRate, sr);
+        const float relCoef = ratePerSecToCoef(v.envRate > 0.0f ? v.envRate : r.releaseRate, sr);
         const float fEnvCoef = ratePerSecToCoef(r.filterDecay, sr);
         const float nyq = (float)sr * 0.5f;
         const float filterMax = std::min(1.0f, r.filterBase);
+        const float velEff = v.vel * (0.55f + 0.45f * v.vel);
+
+        float incL[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        float incR[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        if (r.saw)
+            for (int o = 0; o < r.nOsc; ++o)
+            {
+                const float d = std::exp2f(v.detune[o] / 1200.0f);
+                incL[o] = phaseInc * d;
+                incR[o] = phaseInc / d;
+            }
 
         for (int i = 0; i < num; ++i)
         {
@@ -371,7 +377,20 @@ private:
                 break;
             case EnvStage::Decay:
                 v.envLevel += dCoef * (r.sustainLevel - v.envLevel);
-                if (v.envLevel <= r.sustainLevel + 0.001f) { v.envLevel = r.sustainLevel; v.envStage = EnvStage::Sustain; }
+                if (v.envLevel <= r.sustainLevel + 0.001f)
+                {
+                    v.envLevel = r.sustainLevel;
+                    if (r.sustainLevel <= 0.0005f)
+                    {
+                        v.envLevel = 0.0f;
+                        v.envStage = EnvStage::Off;
+                        v.active = false;
+                    }
+                    else
+                    {
+                        v.envStage = EnvStage::Sustain;
+                    }
+                }
                 break;
             case EnvStage::Sustain:
                 v.envLevel = r.sustainLevel;
@@ -383,59 +402,73 @@ private:
             default: break;
             }
 
-            // filter envelope (closes from 1 toward 0)
+            // filter envelope (opens on note, closes toward base)
             if (r.filterEnv > 0.0f)
                 v.filterEnvLevel += fEnvCoef * (0.0f - v.filterEnvLevel);
             const float cutoff = juce::jlimit(40.0f, nyq * 0.95f,
                 nyq * (filterMax + r.filterEnv * v.filterEnvLevel * (1.0f - filterMax)));
-            const float fc = std::tan(3.14159265f * cutoff / (float)sr);
-            const float a1 = fc / (1.0f + fc);
+            if (cutoff < v.cutLast * 0.995f || cutoff > v.cutLast * 1.005f)
+            {
+                v.cutLast = cutoff;
+                const float fc = std::tan((float)juce::MathConstants<float>::pi * cutoff / (float)sr);
+                v.filterCoef = fc / (1.0f + fc);
+            }
+            const float a1 = v.filterCoef;
 
-            // oscillators
-            float sample = 0.0f;
+            // oscillators: L/R unison with mirrored detune for width
+            float sL = 0.0f, sR = 0.0f;
             if (r.fm)
             {
                 v.modPhase += modInc;
-                const float mod = std::sin(v.modPhase * 6.283185) * r.modAmount;
+                if (v.modPhase >= 1.0f) v.modPhase = std::fmod(v.modPhase, 1.0f);
+                const float mod = std::sin(v.modPhase * 6.283185307179586f) * r.modAmount;
                 v.oscPhase[0] += phaseInc * (1.0f + mod * 0.05f);
-                sample = std::sin(v.oscPhase[0] * 6.283185 + mod);
+                if (v.oscPhase[0] >= 1.0f) v.oscPhase[0] -= 1.0f;
+                sL = sR = std::sin(v.oscPhase[0] * 6.283185307179586f + mod);
             }
             else if (r.saw)
             {
+                const float inv = 1.0f / (float)r.nOsc;
                 for (int o = 0; o < r.nOsc; ++o)
                 {
-                    const float det = std::pow(2.0f, v.detune[o] / 12.0f);
-                    v.oscPhase[o] += phaseInc * det;
-                    sample += sawWave(v.oscPhase[o]) / (float)r.nOsc;
+                    v.oscPhase[o] += incL[o];
+                    if (v.oscPhase[o] >= 1.0f) v.oscPhase[o] -= 1.0f;
+                    v.oscPhaseR[o] += incR[o];
+                    if (v.oscPhaseR[o] >= 1.0f) v.oscPhaseR[o] -= 1.0f;
+                    sL += sawWave(v.oscPhase[o]) * inv;
+                    sR += sawWave(v.oscPhaseR[o]) * inv;
                 }
+            }
+            else if (r.organ)
+            {
+                v.oscPhase[0] += phaseInc;
+                if (v.oscPhase[0] >= 1.0f) v.oscPhase[0] -= 1.0f;
+                const float ph = v.oscPhase[0] * 6.283185307179586f;
+                sL = 0.5f * std::sin(ph);
+                if (fundamental * 2.0f < nyq * 0.95f) sL += 0.25f * std::sin(ph * 2.0f);
+                if (fundamental * 3.0f < nyq * 0.95f) sL += 0.15f * std::sin(ph * 3.0f);
+                if (fundamental * 4.0f < nyq * 0.95f) sL += 0.10f * std::sin(ph * 4.0f);
+                sR = sL;
             }
             else
             {
-                if (currentProgram == Organ)
-                {
-                    v.oscPhase[0] += phaseInc;
-                    sample = 0.5f * std::sin(v.oscPhase[0] * 6.283185)
-                           + 0.25f * std::sin(v.oscPhase[0] * 2.0f * 6.283185)
-                           + 0.15f * std::sin(v.oscPhase[0] * 3.0f * 6.283185)
-                           + 0.10f * std::sin(v.oscPhase[0] * 4.0f * 6.283185);
-                }
-                else
-                {
-                    v.oscPhase[0] += phaseInc;
-                    sample = std::sin(v.oscPhase[0] * 6.283185);
-                }
+                v.oscPhase[0] += phaseInc;
+                if (v.oscPhase[0] >= 1.0f) v.oscPhase[0] -= 1.0f;
+                sL = sR = std::sin(v.oscPhase[0] * 6.283185307179586f);
             }
 
             // one-pole lowpass for character (plucks/keys/brass)
             if (filterMax < 0.95f)
             {
-                v.filterState += a1 * (sample - v.filterState);
-                sample = v.filterState;
+                v.filterState += a1 * (sL - v.filterState);
+                v.filterStateR += a1 * (sR - v.filterStateR);
+                sL = v.filterState;
+                sR = v.filterStateR;
             }
 
-            const float out = sample * v.envLevel * v.vel * r.gain;
-            scratch.setSample(0, i, out);
-            scratch.setSample(1, i, out);
+            const float amp = v.envLevel * velEff * r.gain;
+            outL[i] = sL * amp;
+            outR[i] = sR * amp;
         }
     }
 };

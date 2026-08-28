@@ -74,8 +74,9 @@ public:
             const float a0 = std::fabs(dry0);
             const float a1 = ch1 != nullptr ? std::fabs(dry1) : 0.0f;
             const float peak = a0 > a1 ? a0 : a1;
+            const float pkSq = peak > 1.0e4f ? 1.0e4f : peak;
 
-            rms += rmsC * (peak * peak - rms);
+            rms += rmsC * (pkSq * pkSq - rms);
             if (rms < 1e-24f)
                 rms = 0.0f;
 
@@ -83,6 +84,8 @@ public:
             const float rmsEquiv = std::sqrt(rms) * 1.41421356f;
             if (rmsEquiv > level)
                 level = rmsEquiv;
+            if (level > 1.0e4f)
+                level = 1.0e4f;
 
             float levelDb = gainToDb(level > 1e-8f ? level : 1e-8f);
             if (!(levelDb > -120.0f))

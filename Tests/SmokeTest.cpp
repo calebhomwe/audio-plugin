@@ -152,6 +152,37 @@ int main()
                 finite = false;
         check(finite, "analyzer + EQ curve finite");
 
+        // regression: oversized block (1024 > prepared 512) with saturation on must not crash/OOB
+        h.disableAllModules();
+        h.setOn("sat_enabled", true);
+        h.setRaw("sat_drive", 0.5f); h.setRaw("sat_mix", 1.0f); h.setRaw("sat_out", 0.0f);
+        {
+            const int big = 1024;
+            AudioBuffer<float> bigBuf(2, big);
+            const double inc = 2.0 * juce::MathConstants<double>::pi * 440.0 / 44100.0;
+            double phase = 0.0;
+            bool finite = true; float peak = 0.0f;
+            for (int rep = 0; rep < 3; ++rep)
+            {
+                for (int i = 0; i < big; ++i)
+                {
+                    const float x = 0.5f * (float)std::sin(phase);
+                    phase += inc;
+                    bigBuf.setSample(0, i, x);
+                    bigBuf.setSample(1, i, x);
+                }
+                MidiBuffer empty;
+                h.proc->processBlock(bigBuf, empty);
+                for (int i = 0; i < big; ++i)
+                {
+                    const float v = std::abs(bigBuf.getSample(0, i));
+                    peak = std::max(peak, v);
+                    if (!std::isfinite(v)) finite = false;
+                }
+            }
+            check(finite && peak < 1.5f, "oversized block + saturation - no OOB/NaN");
+        }
+
         // instrument bank: clean chain, fire notes per program (blocks <= prepared size)
         h.disableAllModules();
         h.setRaw("inst_level", 0.0f);
@@ -192,6 +223,21 @@ int main()
                 if (!std::isfinite(v)) finite = false;
             }
             check(finite && peak < 2.0f, (std::string("program ") + agm::InstrumentBank::programName(p) + " finite/bounded").c_str());
+        }
+        // favorites persisted in APVTS state, survive save/load roundtrip
+        auto& procRef = dynamic_cast<MixAgentAudioProcessor&>(*h.proc);
+        procRef.setFavorite(2, true);
+        procRef.setFavorite(9, true);
+        check(procRef.isFavorite(2) && procRef.isFavorite(9) && procRef.getFavoriteCount() == 2, "favorites set");
+        procRef.setFavorite(2, false);
+        check(!procRef.isFavorite(2) && procRef.isFavorite(9), "favorites toggle off");
+        MemoryBlock favState;
+        procRef.getStateInformation(favState);
+        {
+            auto temp = std::make_unique<MixAgentAudioProcessor>();
+            temp->setStateInformation(favState.getData(), (int)favState.getSize());
+            auto& q = dynamic_cast<MixAgentAudioProcessor&>(*temp);
+            check(q.isFavorite(9) && !q.isFavorite(2), "favorites survive state roundtrip");
         }
     }
 

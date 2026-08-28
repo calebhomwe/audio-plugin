@@ -70,7 +70,7 @@ public:
             return;
         }
 
-        const int cols = juce::jmax(1, (int)std::sqrt((double)pads.size()));
+        const int cols = pads.size() > 16 ? (int)std::sqrt((double)pads.size()) : (int)pads.size();
         const int rows = (pads.size() + cols - 1) / cols;
         const int gap = 6;
         const int w = (getWidth() - (cols + 1) * gap) / cols;
@@ -83,38 +83,67 @@ public:
 
             const bool held = heldPads[(size_t)i];
             const bool audio = audioActive ? audioActive() : false;
-            juce::Colour base = pads[i].colour.darker(held ? 0.15f : (audio ? 0.0f : 0.6f));
+            const bool lit = held || audio;
+            const juce::Colour col = pads[i].colour;
+            const juce::Rectangle<float> rf = rct.toFloat();
+            const float cr = 7.0f;
 
-            g.setColour(base.withAlpha(0.9f));
-            g.fillRoundedRectangle(rct.toFloat(), 6.0f);
-            g.setColour(agm::ui::kBorder);
-            g.drawRoundedRectangle(rct.toFloat().reduced(0.5f), 6.0f, 1.0f);
+            static const juce::Colour kBlueTop(0xff2f7dff), kBlueBot(0xff1f4fbf);
 
-            if (held || audio)
+            juce::Colour topC, botC;
+            if (col == kBlueTop) { topC = kBlueTop; botC = kBlueBot; }
+            else                 { topC = col.brighter(0.18f); botC = col.darker(0.25f); }
+
+            if (lit)
             {
-                g.setColour(pads[i].colour.withAlpha(0.35f));
-                g.fillRoundedRectangle(rct.toFloat(), 6.0f);
-                g.setColour(agm::ui::kAccent);
-                g.drawRect(rct.toFloat().reduced(2.0f), 1.0f);
+                topC = topC.brighter(0.32f);
+                botC = botC.darker(0.05f);
+                g.setColour(col.withAlpha(0.35f));
+                g.fillRoundedRectangle(rf.expanded(4.0f), cr + 3.0f);
             }
+            else
+            {
+                topC = topC.darker(0.52f);
+                botC = botC.darker(0.52f);
+            }
+
+            const juce::Colour edgeC = botC.darker(0.40f);
+
+            g.setColour(edgeC);
+            g.fillRoundedRectangle(rf, cr);
+            const juce::Rectangle<float> face = rf.withTrimmedBottom(2.0f);
+            g.setGradientFill(agm::ui::verticalFade(face, topC, botC));
+            g.fillRoundedRectangle(face, cr);
+
+            g.setColour(lit ? col.brighter(0.60f) : agm::ui::kBorder);
+            g.drawRoundedRectangle(rf.reduced(0.5f), cr, 1.0f);
+
+            g.setColour(juce::Colours::white.withAlpha(lit ? 0.26f : 0.13f));
+            g.fillRect(rf.getX() + cr, rf.getY() + 1.5f,
+                       juce::jmax(0.0f, rf.getWidth() - cr * 2.0f), 1.0f);
 
             int note = pads[i].note;
             if (note >= 24 && note <= 48)
             {
                 const float f = 440.0f * std::pow(2.0f, (float)(note - 69) / 12.0f);
-                g.setColour(agm::ui::kText);
+                g.setColour(lit ? juce::Colours::white : agm::ui::kText);
                 g.setFont(juce::Font(juce::FontOptions(13.0f, juce::Font::bold)));
-                g.drawText(pads[i].label, rct.withTrimmedBottom(h - 18).toFloat(), juce::Justification::centred);
-                g.setColour(agm::ui::kTextDim);
-                g.setFont(juce::Font(juce::FontOptions(9.0f)));
-                g.drawText(f >= 100.0f ? juce::String(f, 0) + " Hz" : juce::String(f, 1) + " Hz",
-                           rct.withTop(h - 18).toFloat(), juce::Justification::centred);
+                g.drawText(pads[i].label,
+                           rf.withTrimmedBottom(juce::jmax(0.0f, rf.getHeight() - 20.0f)),
+                           juce::Justification::centred);
+                if (rct.getHeight() >= 36)
+                {
+                    g.setColour(agm::ui::kTextDim);
+                    g.setFont(juce::Font(juce::FontOptions(9.0f)));
+                    g.drawText(f >= 100.0f ? juce::String(f, 0) + " Hz" : juce::String(f, 1) + " Hz",
+                               rf.withTop(rf.getBottom() - 16.0f), juce::Justification::centred);
+                }
             }
             else
             {
-                g.setColour(agm::ui::kText);
+                g.setColour(lit ? juce::Colours::white : agm::ui::kText);
                 g.setFont(juce::Font(juce::FontOptions(12.0f, juce::Font::bold)));
-                g.drawText(pads[i].label, rct.toFloat(), juce::Justification::centred);
+                g.drawText(pads[i].label, rf, juce::Justification::centred);
             }
         }
     }
@@ -124,7 +153,7 @@ private:
     {
         if (pads.empty() || getWidth() <= 0)
             return -1;
-        const int cols = juce::jmax(1, (int)std::sqrt((double)pads.size()));
+        const int cols = pads.size() > 16 ? (int)std::sqrt((double)pads.size()) : (int)pads.size();
         const int rows = (pads.size() + cols - 1) / cols;
         const int gap = 6;
         const int w = (getWidth() - (cols + 1) * gap) / cols;

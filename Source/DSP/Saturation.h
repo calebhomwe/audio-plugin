@@ -3,6 +3,7 @@
 #include "Common.h"
 #include "Biquad.h"
 #include <cmath>
+#include <algorithm>
 
 namespace agm {
 
@@ -15,6 +16,7 @@ public:
         osRate = sr * 4.0;
         const int maxSamples = juce::jmax(blockSize, 1);
         oversampler.initProcessing(static_cast<size_t>(maxSamples));
+        osMaxBlock = static_cast<size_t>(maxSamples);
         oversampler.reset();
         tapeLP[0].prepare(osRate);
         tapeLP[1].prepare(osRate);
@@ -55,12 +57,53 @@ public:
         if (numSamples <= 0 || numChannels <= 0)
             return;
 
+        const bool fullyOff = bypass.fullyOff() || (mix == 0.0f && mixSmooth.settled());
+        if (fullyOff)
+        {
+            if (!wasFullyOff)
+            {
+                oversampler.reset();
+                tapeLP[0].reset();
+                tapeLP[1].reset();
+                exciterHP[0].reset();
+                exciterHP[1].reset();
+                dcServo[0] = 0.0f;
+                dcServo[1] = 0.0f;
+                wasFullyOff = true;
+            }
+            for (int ch = 0; ch < numChannels && ch < 2; ++ch)
+            {
+                float* p = buffer.getWritePointer(ch);
+                for (int i = 0; i < numSamples; ++i)
+                    if (!std::isfinite(p[i]))
+                        p[i] = 0.0f;
+            }
+            return;
+        }
+        wasFullyOff = false;
+
+        if (static_cast<size_t>(numSamples) > osMaxBlock)
+        {
+            oversampler.initProcessing(static_cast<size_t>(numSamples));
+            osMaxBlock = static_cast<size_t>(numSamples);
+        }
+
+        const int chunk = (int)std::min<size_t>((size_t)numSamples, maxSamplesToProcess);
+        for (int base = 0; base < numSamples; base += chunk)
+        {
+            const int n = std::min(chunk, numSamples - base);
+            processChunk(buffer, numChannels, base, n);
+        }
+    }
+
+    void processChunk(juce::AudioBuffer<float>& buffer, int numChannels, int base, int numSamples)
+    {
         if (workBuffer.getNumSamples() < numSamples)
             workBuffer.setSize(2, numSamples, false, false, true);
 
-        juce::FloatVectorOperations::copy(workBuffer.getWritePointer(0), buffer.getReadPointer(0), numSamples);
+        juce::FloatVectorOperations::copy(workBuffer.getWritePointer(0), buffer.getReadPointer(0) + base, numSamples);
         juce::FloatVectorOperations::copy(workBuffer.getWritePointer(1),
-                                          numChannels > 1 ? buffer.getReadPointer(1) : buffer.getReadPointer(0),
+                                          numChannels > 1 ? buffer.getReadPointer(1) + base : buffer.getReadPointer(0) + base,
                                           numSamples);
 
         juce::dsp::AudioBlock<float> upBlock(workBuffer);
@@ -74,16 +117,26 @@ public:
         float* osL = osBlock.getChannelPointer(0);
         float* osR = osBlock.getChannelPointer(1);
 
+        bool poisoned = false;
         for (int i = 0; i < osNum; ++i)
         {
             const float pre = driveGainSmooth.next();
             const float post = outGainSmooth.next();
             const float amount = bypass.next() * mixSmooth.next();
             const float modeMix = modeMixSmooth.next();
-            if (amount > 0.0f)
+
+            float inL = osL[i];
+            float inR = osR[i];
+            const bool corrupt = !std::isfinite(inL) || !std::isfinite(inR);
+            if (!std::isfinite(inL))
+                inL = 0.0f;
+            if (!std::isfinite(inR))
+                inR = 0.0f;
+            if (corrupt)
+                poisoned = true;
+
+            if (amount > 0.0f || corrupt)
             {
-                const float inL = sanitize(osL[i]);
-                const float inR = sanitize(osR[i]);
                 float wetL = shapeSample(0, mode, inL * pre);
                 float wetR = shapeSample(1, mode, inR * pre);
                 if (modeMix < 1.0f)
@@ -101,15 +154,18 @@ public:
             }
         }
 
-        juce::dsp::AudioBlock<float> downBlock(buffer);
+        if (poisoned)
+            oversampler.reset();
+
+        juce::dsp::AudioBlock<float> downFull(buffer);
         if (numChannels == 1)
         {
-            auto monoBlock = downBlock.getSingleChannelBlock(0);
+            auto monoBlock = downFull.getSingleChannelBlock(0).getSubBlock(base, numSamples);
             oversampler.processSamplesDown(monoBlock);
         }
         else
         {
-            auto stereoBlock = downBlock.getSubsetChannelBlock(0, 2);
+            auto stereoBlock = downFull.getSubsetChannelBlock(0, 2).getSubBlock(base, numSamples);
             oversampler.processSamplesDown(stereoBlock);
         }
     }
@@ -194,6 +250,9 @@ private:
 
     juce::dsp::Oversampling<float> oversampler { 2, 2, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, true };
     juce::AudioBuffer<float> workBuffer;
+    size_t maxSamplesToProcess = 256;
+    size_t osMaxBlock = 0;
+    bool wasFullyOff = false;
     Biquad tapeLP[2];
     Biquad exciterHP[2];
     SmoothBypass bypass;

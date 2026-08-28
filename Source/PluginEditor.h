@@ -24,6 +24,9 @@ private:
     juce::ToggleButton* addToggle(const juce::String& id, const juce::String& text);
     void placeKnobs(float centreX, int y, const juce::Array<agm::ui::Knob*>& ks, int w = 50, int h = 72);
     void drawHeader(juce::Graphics& g, juce::Rectangle<int> r, const char* name);
+    void updateProgramList();
+    void onClickFav();
+    bool fullyBuilt = false;
 
     MixAgentAudioProcessor& proc;
 
@@ -39,11 +42,14 @@ private:
     agm::ui::PadGrid padGrid { [this](int note) { proc.uiNoteOn(note, 0.9f); },
                                [this](int note) { proc.uiNoteOff(note); },
                                [this] { return proc.getInstrumentActive(); } };
-    juce::Label padLabel { {}, "DRUM MACHINE / 808 - MOUSE OR MIDI" };
+    juce::Label padLabel { {}, "DRUM / 808 - MIDI OR MOUSE" };
     juce::ComboBox instProgramCombo;
+    juce::ComboBox instFilterCombo;
+    juce::ToggleButton favToggle { "FAV" };
     agm::ui::Knob* instLevel = nullptr;
     juce::ToggleButton* instPower = nullptr;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> instProgramAttachment;
+    int auditionTimerRemaining = 0;
 
     juce::OwnedArray<juce::ToggleButton> powerToggles;
     juce::OwnedArray<agm::ui::Knob> knobs;

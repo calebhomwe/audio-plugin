@@ -231,7 +231,7 @@ private:
         dl.buf[(size_t)dl.idx] = in + 0.5f * out;
         if (++dl.idx >= dl.curLen)
             dl.idx = 0;
-        return out - in;
+        return 0.75f * out - 0.5f * in;
     }
 
     void clearTank()

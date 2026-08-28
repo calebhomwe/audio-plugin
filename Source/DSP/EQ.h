@@ -17,8 +17,11 @@ public:
         for (int ch = 0; ch < 2; ++ch)
             for (int i = 0; i < 7; ++i)
                 bands[ch][i].prepare(fs);
+        hpMix.setEnabled(hpOn);
         hpMix.prepare(fs);
+        lpMix.setEnabled(lpOn);
         lpMix.prepare(fs);
+        masterMix.setEnabled(enabled);
         masterMix.prepare(fs);
         for (int i = 0; i < 7; ++i)
         {
@@ -54,7 +57,10 @@ public:
             for (int s = 0; s < numSamples; ++s)
             {
                 smoothParams();
-                ch[s] = processSample(ch[s], 0);
+                const float mHp = hpMix.next();
+                const float mLp = lpMix.next();
+                const float mMaster = masterMix.next();
+                ch[s] = processSample(ch[s], 0, mHp, mLp, mMaster);
             }
         }
         else
@@ -64,8 +70,11 @@ public:
             for (int s = 0; s < numSamples; ++s)
             {
                 smoothParams();
-                l[s] = processSample(l[s], 0);
-                r[s] = processSample(r[s], 1);
+                const float mHp = hpMix.next();
+                const float mLp = lpMix.next();
+                const float mMaster = masterMix.next();
+                l[s] = processSample(l[s], 0, mHp, mLp, mMaster);
+                r[s] = processSample(r[s], 1, mHp, mLp, mMaster);
             }
         }
     }
@@ -187,12 +196,11 @@ private:
         }
     }
 
-    float processSample(float x, int ch)
+    float processSample(float x, int ch, float mHp, float mLp, float mMaster)
     {
         if (!std::isfinite(x))
             x = 0.0f;
         float y = bands[ch][0].process(x);
-        const float mHp = hpMix.next();
         y = y * mHp + x * (1.0f - mHp);
         y = bands[ch][1].process(y);
         y = bands[ch][2].process(y);
@@ -201,9 +209,7 @@ private:
         y = bands[ch][5].process(y);
         const float lpIn = y;
         y = bands[ch][6].process(y);
-        const float mLp = lpMix.next();
         y = y * mLp + lpIn * (1.0f - mLp);
-        const float mMaster = masterMix.next();
         y = y * mMaster + x * (1.0f - mMaster);
         return std::isfinite(y) ? y : 0.0f;
     }

@@ -95,10 +95,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout MixAgentAudioProcessor::crea
     layout.add(std::make_unique<AudioParameterFloat>("lim_attack", "Lim Attack", 0.01f, 10.0f, 1.0f));
     layout.add(std::make_unique<AudioParameterFloat>("lim_release", "Lim Release", 10.0f, 500.0f, 120.0f));
 
-    layout.add(std::make_unique<AudioParameterBool>("bass_enabled", "Bass On", true));
-    layout.add(std::make_unique<AudioParameterFloat>("bass_drive", "Bass Drive", 0.1f, 4.0f, 1.2f));
-    layout.add(std::make_unique<AudioParameterFloat>("bass_glide", "Bass Glide", 0.0f, 1.0f, 0.08f));
-    layout.add(std::make_unique<AudioParameterFloat>("bass_level", "Bass Level", -40.0f, 6.0f, -6.0f));
     layout.add(std::make_unique<AudioParameterFloat>("drum_level", "Drum Level", -40.0f, 6.0f, -14.0f));
 
     juce::StringArray instNames;
@@ -171,10 +167,6 @@ void MixAgentAudioProcessor::handleParameter(const juce::String& id, float rawVa
     else if (id == "lim_ceiling") { limiter.setCeilingDb(rawValue); }
     else if (id == "lim_attack") { limiter.setAttackMs(rawValue); }
     else if (id == "lim_release") { limiter.setReleaseMs(rawValue); }
-    else if (id == "bass_enabled") { drumEngine.setEnabled(rawValue > 0.5f); }
-    else if (id == "bass_drive") { drumEngine.setBassDrive(rawValue); }
-    else if (id == "bass_glide") { drumEngine.setBassGlideSec(rawValue); }
-    else if (id == "bass_level") { drumEngine.setBassLevelDb(rawValue); }
     else if (id == "drum_level") { drumEngine.setDrumLevelDb(rawValue); }
     else if (id == "inst_enabled") { instruments.setEnabled(rawValue > 0.5f); }
     else if (id == "inst_program") { instruments.setProgram((int)(rawValue + 0.5f)); }
@@ -217,7 +209,7 @@ void MixAgentAudioProcessor::prepareToPlay(double sr, int blockSize)
     fftPos = 0;
     inGainSmoothed = agm::dbToGain(inGainDb);
     outGainSmoothed = agm::dbToGain(outGainDb);
-    setLatencySamples(limiter.getLatencySamples());
+    setLatencySamples(limiter.getLatencySamples() + saturator.getLatencySamples());
     skipModules.clear();
     skipModules.addTokens(juce::SystemStats::getEnvironmentVariable("AGM_SKIP", ""), " ", "");
 }
@@ -428,12 +420,67 @@ void MixAgentAudioProcessor::setStateInformation(const void* data, int sizeInByt
 
 namespace
 {
-const char* const kPresetNames[] = { "Init", "Clean Master", "Vocal Presence", "Drum Bus Punch", "Wide & Spacey", "Warm Tape" };
+const char* const kPresetNames[] = { "Init", "Clean Master", "Vocal Presence", "Drum Bus Punch", "Wide & Spacey", "Warm Tape",
+    "Trap: Drill Bell", "Trap: Rage Lead", "Trap: Jersey Keys", "Trap: Plugg Pad", "Trap: BoomBap EP", "Trap: Sub Glue" };
 }
 
 const juce::String MixAgentAudioProcessor::getProgramName(int index)
 {
     return kPresetNames[juce::jlimit(0, kPresetCount - 1, index)];
+}
+
+namespace
+{
+juce::ValueTree getFavorites(juce::ValueTree& state)
+{
+    juce::ValueTree fav = state.getChildWithName("favorites");
+    if (fav.isValid())
+        return fav;
+    juce::ValueTree created("favorites");
+    state.addChild(created, -1, nullptr);
+    return created;
+}
+}
+
+bool MixAgentAudioProcessor::isFavorite(int program) const
+{
+    const juce::ValueTree fav = apvts.state.getChildWithName("favorites");
+    if (!fav.isValid())
+        return false;
+    for (int i = 0; i < fav.getNumChildren(); ++i)
+        if (fav.getChild(i).getProperty("p").toString() == juce::String(program))
+            return true;
+    return false;
+}
+
+void MixAgentAudioProcessor::setFavorite(int program, bool fav)
+{
+    juce::ValueTree favorites = getFavorites(apvts.state);
+    auto remove = [&]
+    {
+        for (int i = favorites.getNumChildren() - 1; i >= 0; --i)
+            if (favorites.getChild(i).getProperty("p").toString() == juce::String(program))
+                favorites.removeChild(i, nullptr);
+    };
+
+    if (fav)
+    {
+        if (isFavorite(program))
+            return;
+        juce::ValueTree entry("fav");
+        entry.setProperty("p", juce::String(program), nullptr);
+        favorites.addChild(entry, -1, nullptr);
+    }
+    else
+    {
+        remove();
+    }
+}
+
+int MixAgentAudioProcessor::getFavoriteCount() const
+{
+    const juce::ValueTree fav = apvts.state.getChildWithName("favorites");
+    return fav.isValid() ? fav.getNumChildren() : 0;
 }
 
 void MixAgentAudioProcessor::setCurrentProgram(int index)
@@ -491,6 +538,57 @@ void MixAgentAudioProcessor::setCurrentProgram(int index)
         setRaw("eq_lsf_freq", 150.0f); setRaw("eq_lsf_gain", 1.5f);
         setRaw("comp_thresh", -18.0f); setRaw("comp_ratio", 2.0f);
         setRaw("comp_attack", 20.0f); setRaw("comp_release", 300.0f); setRaw("comp_makeup", 2.0f);
+        setRaw("lim_ceiling", -0.7f);
+        break;
+    case 6: // Drill Bell — cold, dark, detached
+        setRaw("inst_enabled", 1.0f); setRaw("inst_program", 1.0f); setRaw("inst_level", -8.0f);
+        setRaw("eq_lp_enabled", 1.0f); setRaw("eq_lp_freq", 9000.0f);
+        setRaw("eq_hp_enabled", 1.0f); setRaw("eq_hp_freq", 35.0f);
+        setRaw("sat_enabled", 1.0f); setRaw("sat_mode", 2.0f); setRaw("sat_drive", 0.25f); setRaw("sat_mix", 0.35f);
+        setRaw("comp_thresh", -24.0f); setRaw("comp_ratio", 2.5f); setRaw("comp_makeup", 1.5f);
+        setRaw("lim_ceiling", -1.0f);
+        break;
+    case 7: // Rage Lead — bright, wide, driving
+        setRaw("inst_enabled", 1.0f); setRaw("inst_program", 3.0f); setRaw("inst_level", -9.0f);
+        setRaw("eq_hsf_freq", 9000.0f); setRaw("eq_hsf_gain", 2.0f);
+        setRaw("sat_enabled", 1.0f); setRaw("sat_mode", 0.0f); setRaw("sat_drive", 0.6f); setRaw("sat_mix", 0.6f);
+        setRaw("comp_thresh", -16.0f); setRaw("comp_ratio", 4.0f); setRaw("comp_makeup", 2.0f);
+        setRaw("img_enabled", 1.0f); setRaw("img_width", 135.0f);
+        setRaw("lim_ceiling", -0.7f);
+        break;
+    case 8: // Jersey Keys — warm, forward, tight
+        setRaw("inst_enabled", 1.0f); setRaw("inst_program", 2.0f); setRaw("inst_level", -8.0f);
+        setRaw("eq_lsf_freq", 180.0f); setRaw("eq_lsf_gain", 2.0f);
+        setRaw("eq_hp_enabled", 1.0f); setRaw("eq_hp_freq", 45.0f);
+        setRaw("sat_enabled", 1.0f); setRaw("sat_mode", 2.0f); setRaw("sat_drive", 0.3f); setRaw("sat_mix", 0.45f);
+        setRaw("comp_thresh", -20.0f); setRaw("comp_ratio", 3.0f); setRaw("comp_makeup", 2.0f);
+        setRaw("lim_ceiling", -1.0f);
+        break;
+    case 9: // Plugg Pad — lush, wide, ambient
+        setRaw("inst_enabled", 1.0f); setRaw("inst_program", 4.0f); setRaw("inst_level", -10.0f);
+        setRaw("eq_lp_enabled", 1.0f); setRaw("eq_lp_freq", 12000.0f);
+        setRaw("rvb_enabled", 1.0f); setRaw("rvb_size", 0.85f); setRaw("rvb_decay", 5.0f);
+        setRaw("rvb_mix", 0.45f); setRaw("rvb_predelay", 35.0f);
+        setRaw("dly_enabled", 1.0f); setRaw("dly_time", 420.0f); setRaw("dly_feedback", 0.45f);
+        setRaw("dly_mix", 0.3f); setRaw("dly_width", 1.0f);
+        setRaw("img_enabled", 1.0f); setRaw("img_width", 150.0f);
+        setRaw("lim_ceiling", -1.5f);
+        break;
+    case 10: // BoomBap EP — dusty, boxy, mid-focused
+        setRaw("inst_enabled", 1.0f); setRaw("inst_program", 7.0f); setRaw("inst_level", -8.0f);
+        setRaw("eq_hp_enabled", 1.0f); setRaw("eq_hp_freq", 120.0f);
+        setRaw("eq_lp_enabled", 1.0f); setRaw("eq_lp_freq", 8000.0f);
+        setRaw("eq_p1_freq", 3500.0f); setRaw("eq_p1_gain", -2.0f); setRaw("eq_p1_q", 1.0f);
+        setRaw("sat_enabled", 1.0f); setRaw("sat_mode", 1.0f); setRaw("sat_drive", 0.45f); setRaw("sat_mix", 0.7f);
+        setRaw("comp_thresh", -22.0f); setRaw("comp_ratio", 2.5f); setRaw("comp_makeup", 1.5f);
+        setRaw("lim_ceiling", -1.0f);
+        break;
+    case 11: // Sub Glue — deep, controlled low-end
+        setRaw("inst_enabled", 1.0f); setRaw("inst_program", 9.0f); setRaw("inst_level", -6.0f);
+        setRaw("eq_hp_enabled", 1.0f); setRaw("eq_hp_freq", 28.0f);
+        setRaw("eq_p1_freq", 60.0f); setRaw("eq_p1_gain", 3.0f); setRaw("eq_p1_q", 1.0f);
+        setRaw("sat_enabled", 1.0f); setRaw("sat_mode", 0.0f); setRaw("sat_drive", 0.5f); setRaw("sat_mix", 0.5f);
+        setRaw("comp_thresh", -18.0f); setRaw("comp_ratio", 3.5f); setRaw("comp_makeup", 2.5f);
         setRaw("lim_ceiling", -0.7f);
         break;
     }
