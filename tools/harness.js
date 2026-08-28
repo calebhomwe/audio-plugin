@@ -60,7 +60,7 @@ function makeEl(tag, id) {
     addEventListener(type, fn) { const k = keyOf(el); if (!listeners.has(k)) listeners.set(k, {}); (listeners.get(k)[type] ||= []).push(fn); },
     removeEventListener() {},
     appendChild(c) { el.children.push(c); return c; },
-    removeChild(c) { return c; }, insertBefore(c) { return c; }, replaceChildren() {},
+    removeChild(c) { return c; },     insertBefore(c) { return c; }, replaceChildren() {}, insertAdjacentHTML() { el.children.push(makeEl('div')); },
     remove() {}, replaceWith() {}, cloneNode() { return makeEl(tag, id); },
     setAttribute() {}, getAttribute() { return null; }, removeAttribute() {}, hasAttribute() { return false; },
     getBoundingClientRect() { return { left: 0, top: 0, right: 320, bottom: 320, width: 320, height: 320, x: 0, y: 0 }; },
@@ -71,7 +71,15 @@ function makeEl(tag, id) {
     getContext() { return ctx2d(el); },
     toDataURL() { return 'data:image/png;base64,'; },
   };
-  el.firstChild = null; el.lastChild = null; el.nextSibling = null; el.ownerDocument = null;
+  Object.defineProperty(el, 'firstChild', { configurable: true, get() {
+    if (el.children.length) return el.children[0];
+    if (!el.__txt) el.__txt = { nodeValue: '', textContent: '' };
+    return el.__txt;
+  }});
+  Object.defineProperty(el, 'lastChild', { configurable: true, get() {
+    return el.children.length ? el.children[el.children.length - 1] : null;
+  }});
+  el.nextSibling = null; el.ownerDocument = null;
   Object.defineProperty(el, 'parentElement', { configurable: true, get() { return getBody(); } });
   Object.defineProperty(el, 'parentNode', { configurable: true, get() { return getBody(); } });
   return el;
@@ -142,9 +150,11 @@ const sandbox = {
   innerWidth: 390, innerHeight: 844, devicePixelRatio: 2,
   screen: { width: 390, height: 844 },
   matchMedia: () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} }),
+  getComputedStyle: () => ({ getPropertyValue() { return ''; } }),
   addEventListener(type, fn) { (winListeners[type] ||= []).push(fn); },
   removeEventListener() {},
   alert() {}, confirm() { return true; }, prompt() { return ''; },
+  CanvasRenderingContext2D: function () {},
   AudioContext: function () { return deepStub('AudioContext'); },
   webkitAudioContext: function () { return deepStub('AudioContext'); },
   Image: function () { return makeEl('img'); },

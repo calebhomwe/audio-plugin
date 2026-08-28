@@ -12,3 +12,13 @@ repos/
 reverb_runtime.obj
 smoke_err.txt
 smoke_out.txt
+buildQ1/
+buildQ2/
+buildQ3/
+HeatFirm/
+heat-firm-godot/
+unity/
+Qwen3.8-27B_Colab.ipynb
+_probe.html
+_geoprobe.html
+.opencode/node_modules/
