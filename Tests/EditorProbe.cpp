@@ -26,7 +26,7 @@ int main()
             juce::File out = juce::File::getSpecialLocation(juce::File::tempDirectory)
                                  .getChildFile("mixagent_ui_v2.png");
             if (const char* envPath = std::getenv("AGM_PROBE_PNG"); envPath != nullptr && envPath[0] != '\0')
-                out = juce::File(juce::String::fromRawUTF8(envPath));
+                out = juce::File(juce::String::fromUTF8(envPath));
             {
                 juce::FileOutputStream fos(out);
                 juce::PNGImageFormat pf;
