@@ -79,7 +79,10 @@ private:
     agm::DrumEngine drumEngine;
     agm::InstrumentBank instruments;
 
-    float inGainDb = 0.0f, outGainDb = 0.0f;
+    // Written on the message thread (handleParameter), read on the audio thread.
+    // Atomic so the per-block read is race-free; sample-level glide stays in the
+    // processBlock ramp (inGainSmoothed/outGainSmoothed).
+    std::atomic<float> inGainDb { 0.0f }, outGainDb { 0.0f };
     float inGainSmoothed = 1.0f, outGainSmoothed = 1.0f;
     double sampleRate = 44100.0;
     int currentProgram = 0;

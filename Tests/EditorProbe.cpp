@@ -1,4 +1,5 @@
 ﻿#include <JuceHeader.h>
+#include <cstdlib>
 #include "Source/PluginProcessor.h"
 #include "Source/PluginEditor.h"
 
@@ -22,7 +23,10 @@ int main()
         {
             edPtr->setBounds(0, 0, 1160, 920);
             juce::Image img = edPtr->createComponentSnapshot(juce::Rectangle<int>(0, 0, 1160, 920));
-            juce::File out("C:\\Users\\code\\AppData\\Local\\Temp\\mixagent_ui_v2.png");
+            juce::File out = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                 .getChildFile("mixagent_ui_v2.png");
+            if (const char* envPath = std::getenv("AGM_PROBE_PNG"); envPath != nullptr && envPath[0] != '\0')
+                out = juce::File(juce::String::fromRawUTF8(envPath));
             {
                 juce::FileOutputStream fos(out);
                 juce::PNGImageFormat pf;

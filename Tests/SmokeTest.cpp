@@ -7,7 +7,7 @@ static int gFailures = 0;
 
 static void check(bool ok, const char* name)
 {
-    std::cout << (ok ? "[PASS] " : "[FAIL] ") << name << "\n";
+    std::cout << (ok ? "[PASS] " : "[FAIL] ") << name << std::endl;
     if (!ok)
         gFailures++;
 }
@@ -183,6 +183,41 @@ int main()
             check(finite && peak < 1.5f, "oversized block + saturation - no OOB/NaN");
         }
 
+        // lookahead limiter: transient riding a 0.9 pre-ramp must be caught before emerging
+        h.disableAllModules();
+        h.setOn("lim_enabled", true);
+        h.setRaw("lim_ceiling", -1.0f);
+        h.setRaw("lim_attack", 1.0f);
+        h.setRaw("lim_release", 120.0f);
+        {
+            float limPeak = 0.0f;
+            bool limFinite = true;
+            const int rampLen = 2048;   // > W so the pre-ramp is fully in the line
+            const int total = rampLen + 2048;
+            for (int done = 0; done < total; done += 512)
+            {
+                const int n = std::min(512, total - done);
+                AudioBuffer<float> buf(2, n);
+                for (int i = 0; i < n; ++i)
+                {
+                    const int idx = done + i;
+                    const float x = idx < rampLen ? 0.9f : (idx == rampLen ? 2.0f : 0.0f);
+                    buf.setSample(0, i, x);
+                    buf.setSample(1, i, x);
+                }
+                MidiBuffer empty;
+                h.proc->processBlock(buf, empty);
+                for (int i = 0; i < n; ++i)
+                {
+                    const float v = std::abs(buf.getSample(0, i));
+                    limPeak = std::max(limPeak, v);
+                    if (!std::isfinite(v)) limFinite = false;
+                }
+            }
+            std::cout << "oversized-path limiter peak: " << limPeak << std::endl;
+            check(limFinite && limPeak <= 1.003f, "limiter catches 0.9 pre-ramp transient (peak <= 1.003)");
+        }
+
         // instrument bank: clean chain, fire notes per program (blocks <= prepared size)
         h.disableAllModules();
         h.setRaw("inst_level", 0.0f);
@@ -223,6 +258,47 @@ int main()
                 if (!std::isfinite(v)) finite = false;
             }
             check(finite && peak < 2.0f, (std::string("program ") + agm::InstrumentBank::programName(p) + " finite/bounded").c_str());
+        }
+        // program switching mid-sustain every 64 samples across the full bank
+        {
+            dynamic_cast<MixAgentAudioProcessor&>(*h.proc).setInstrumentProgram(0);
+            {
+                MidiBuffer mb;
+                mb.addEvent(MidiMessage::noteOn(1, 64, 0.9f), 0);
+                AudioBuffer<float> buf(2, 512);
+                buf.clear();
+                h.proc->processBlock(buf, mb);
+            }
+            bool swFinite = true;
+            float swPeak = 0.0f;
+            int p = 0;
+            for (int rep = 0; rep < 16 * 8; ++rep)
+            {
+                if (rep % 8 == 0)
+                {
+                    dynamic_cast<MixAgentAudioProcessor&>(*h.proc)
+                        .setInstrumentProgram(p % (int)agm::InstrumentBank::kCount);
+                    ++p;
+                }
+                AudioBuffer<float> buf(2, 64);
+                buf.clear();
+                MidiBuffer empty;
+                h.proc->processBlock(buf, empty);
+                for (int i = 0; i < 64; ++i)
+                {
+                    const float v = std::abs(buf.getSample(0, i));
+                    swPeak = std::max(swPeak, v);
+                    if (!std::isfinite(v)) swFinite = false;
+                }
+            }
+            {
+                MidiBuffer mb;
+                mb.addEvent(MidiMessage::noteOff(1, 64), 0);
+                AudioBuffer<float> buf(2, 64);
+                buf.clear();
+                h.proc->processBlock(buf, mb);
+            }
+            check(swFinite && swPeak < 4.0f, "16-program switch every 64 samples mid-sustain - finite/bounded");
         }
         // favorites persisted in APVTS state, survive save/load roundtrip
         auto& procRef = dynamic_cast<MixAgentAudioProcessor&>(*h.proc);

@@ -207,8 +207,8 @@ void MixAgentAudioProcessor::prepareToPlay(double sr, int blockSize)
         bucketMap[k] = b;
     }
     fftPos = 0;
-    inGainSmoothed = agm::dbToGain(inGainDb);
-    outGainSmoothed = agm::dbToGain(outGainDb);
+    inGainSmoothed = agm::dbToGain(inGainDb.load());
+    outGainSmoothed = agm::dbToGain(outGainDb.load());
     setLatencySamples(limiter.getLatencySamples() + saturator.getLatencySamples());
     skipModules.clear();
     skipModules.addTokens(juce::SystemStats::getEnvironmentVariable("AGM_SKIP", ""), " ", "");
@@ -276,8 +276,8 @@ void MixAgentAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     drumEngine.renderAdd(buffer, numCh);
 
     const float gainCoef = 1.0f - std::exp(-(float)numSamples / (0.010f * (float)sampleRate));
-    const float inTarget = agm::dbToGain(inGainDb);
-    const float outTarget = agm::dbToGain(outGainDb);
+    const float inTarget = agm::dbToGain(inGainDb.load());
+    const float outTarget = agm::dbToGain(outGainDb.load());
 
     float g = inGainSmoothed;
     float inL = 0.0f, inR = 0.0f;
