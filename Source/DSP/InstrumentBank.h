@@ -87,6 +87,7 @@ public:
         v.envLevel = 0.0f;
         v.envRate = 0.0f;
         v.filterEnvLevel = 1.0f;
+        v.recipe = recipe;
         for (int i = 0; i < recipe.nOsc && i < 4; ++i)
             v.detune[i] = (float)((rand01() - 0.5) * 2.0) * recipe.detune;
     }
@@ -98,7 +99,7 @@ public:
             if (v.active && v.note == n && v.envStage != EnvStage::Release && v.envStage != EnvStage::Off)
             {
                 v.envStage = EnvStage::Release;
-                v.envRate = recipe.releaseRate;
+                v.envRate = v.recipe.releaseRate;
             }
     }
 
@@ -108,7 +109,7 @@ public:
             if (v.active && v.envStage != EnvStage::Off)
             {
                 v.envStage = EnvStage::Release;
-                v.envRate = recipe.releaseRate * 4.0f;
+                v.envRate = v.recipe.releaseRate * 4.0f;
             }
     }
 
@@ -183,6 +184,7 @@ private:
         float filterEnvLevel = 1.0f;
         float cutLast = -1.0f;
         float filterCoef = 0.0f;
+        Recipe recipe {};
         uint32_t age = 0;
     };
 
@@ -344,7 +346,7 @@ private:
 
     void renderVoice(Voice& v, int num, float* outL, float* outR)
     {
-        const Recipe& r = recipe;
+        const Recipe& r = v.recipe;
         const float fundamental = v.freq * std::pow(2.0f, r.octaveShift);
         const float phaseInc = fundamental / (float)sr;
         const float modInc = phaseInc * r.modRatio;
