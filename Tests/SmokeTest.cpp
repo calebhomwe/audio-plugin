@@ -224,6 +224,34 @@ int main()
             }
             check(finite && peak < 2.0f, (std::string("program ") + agm::InstrumentBank::programName(p) + " finite/bounded").c_str());
         }
+        // Browsing presets must not rewrite the recipe of notes already sounding.
+        {
+            agm::InstrumentBank switched, control;
+            switched.prepare(44100.0, 256);
+            control.prepare(44100.0, 256);
+            switched.setProgram((int)agm::InstrumentBank::Pluck);
+            control.setProgram((int)agm::InstrumentBank::Pluck);
+            switched.noteOn(60, 0.8f);
+            control.noteOn(60, 0.8f);
+
+            AudioBuffer<float> warmA(2, 256), warmB(2, 256);
+            warmA.clear(); warmB.clear();
+            switched.renderAdd(warmA, 2);
+            control.renderAdd(warmB, 2);
+
+            switched.setProgram((int)agm::InstrumentBank::RageLead);
+            AudioBuffer<float> tailA(2, 256), tailB(2, 256);
+            tailA.clear(); tailB.clear();
+            switched.renderAdd(tailA, 2);
+            control.renderAdd(tailB, 2);
+
+            float maxDelta = 0.0f;
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < 256; ++i)
+                    maxDelta = std::max(maxDelta,
+                        std::abs(tailA.getSample(ch, i) - tailB.getSample(ch, i)));
+            check(maxDelta < 1.0e-6f, "program switch preserves active voice recipe");
+        }
         // favorites persisted in APVTS state, survive save/load roundtrip
         auto& procRef = dynamic_cast<MixAgentAudioProcessor&>(*h.proc);
         procRef.setFavorite(2, true);
