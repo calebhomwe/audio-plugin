@@ -90,8 +90,7 @@ public:
             if (v.active && v.held)
             {
                 v.held = false;
-                v.envStage = EnvStage::Release;
-                v.envRate = v.recipe.releaseRate;
+                startRelease(v, v.recipe.releaseRate);
             }
     }
 
@@ -144,8 +143,7 @@ public:
             if (v.active && v.note == n && v.envStage != EnvStage::Release && v.envStage != EnvStage::Off)
             {
                 if (sustainPedal) { v.held = true; continue; }
-                v.envStage = EnvStage::Release;
-                v.envRate = v.recipe.releaseRate;
+                startRelease(v, v.recipe.releaseRate);
             }
     }
 
@@ -156,8 +154,7 @@ public:
             if (v.active && v.envStage != EnvStage::Off)
             {
                 v.held = false;
-                v.envStage = EnvStage::Release;
-                v.envRate = v.recipe.releaseRate * 4.0f;
+                startRelease(v, v.recipe.releaseRate * 4.0f);
             }
     }
 
@@ -261,6 +258,10 @@ private:
         float filterCoef = 0.0f;
         Recipe recipe {};
         uint32_t age = 0;
+        int releaseSamples = 0;
+        int releaseCapSamples = 0;
+        float releaseFade = 1.0f;
+        float releaseFadeStep = 0.0f;
     };
 
     std::array<Voice, kVoices> voices {};
@@ -277,6 +278,20 @@ private:
     bool enabled = true;
     juce::AudioBuffer<float> scratch;
     uint32_t randState = 0x1234u;
+
+    static constexpr float kSilentLevel = 1.585e-5f;   // -96 dB
+
+    void startRelease(Voice& v, float rate)
+    {
+        v.envStage = EnvStage::Release;
+        v.envRate = rate;
+        const double releaseSec = rate > 0.0f ? 1.0 / (double)rate : 0.0;
+        v.releaseSamples = 0;
+        v.releaseCapSamples = (int)(std::max(3.0 * releaseSec, 2.0) * sr);
+        const double fadeSec = juce::jlimit(0.05, 1.0, 0.5 * releaseSec);
+        v.releaseFadeStep = (float)(1.0 / (fadeSec * sr));
+        v.releaseFade = 1.0f;
+    }
 
     void syncProgram()
     {
@@ -546,9 +561,20 @@ private:
                 v.envLevel = r.sustainLevel;
                 break;
             case EnvStage::Release:
+            {
                 v.envLevel += relCoef * (0.0f - v.envLevel);
-                if (v.envLevel < 0.0005f) { v.envLevel = 0.0f; v.envStage = EnvStage::Off; v.active = false; }
+                // Free the voice at -96 dB, or fade it out once it has been releasing for
+                // max(3 x release, 2 s): an exponential tail would otherwise hog the
+                // voice for ~11 time constants (Pad: 11 s) while inaudible.
+                ++v.releaseSamples;
+                if (v.releaseSamples > v.releaseCapSamples)
+                {
+                    v.releaseFade -= v.releaseFadeStep;
+                    if (v.releaseFade <= 0.0f) { v.releaseFade = 0.0f; v.envLevel = 0.0f; }
+                }
+                if (v.envLevel < kSilentLevel) { v.envLevel = 0.0f; v.envStage = EnvStage::Off; v.active = false; }
                 break;
+            }
             default: break;
             }
 
@@ -616,7 +642,7 @@ private:
                 sR = v.filterStateR;
             }
 
-            const float amp = v.envLevel * velEff * r.gain;
+            const float amp = v.envLevel * v.releaseFade * velEff * r.gain;
             outL[i] = sL * amp;
             outR[i] = sR * amp;
         }
