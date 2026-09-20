@@ -126,7 +126,7 @@ private:
     {
         juce::Font f(options);
         g.setFont(f);
-        const int w = g.getCurrentFont().getStringWidth(text);
+        const int w = (int)std::ceil(juce::GlyphArrangement::getStringWidth(g.getCurrentFont(), text));
         if (w > area.getWidth() && w > 0)
         {
             f.setHorizontalScale(juce::jmax(0.55f, (float)area.getWidth() / (float)w));

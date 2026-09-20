@@ -276,7 +276,7 @@ void MixAgentAudioProcessorEditor::drawHeader(juce::Graphics& g, juce::Rectangle
     g.setColour(agm::ui::kTextDim);
     g.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
     g.drawText(name, r.getX() + 10, r.getY() + 3, r.getWidth() - 20, 20, juce::Justification::centredLeft);
-    const float w = (float)g.getCurrentFont().getStringWidth(name);
+    const float w = juce::GlyphArrangement::getStringWidth(g.getCurrentFont(), name);
     const float ux = (float)(r.getX() + 10);
     const float uy = (float)(r.getY() + 24);
     g.setGradientFill(juce::ColourGradient(agm::ui::kAccent, ux, uy,
@@ -348,7 +348,7 @@ void MixAgentAudioProcessorEditor::paint(juce::Graphics& g)
         g.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
         g.drawText(name, drumRect.getX() + 34, drumRect.getY() + 3, drumRect.getWidth() - 44, 20,
                    juce::Justification::centredLeft);
-        const float w = (float)g.getCurrentFont().getStringWidth(name);
+        const float w = juce::GlyphArrangement::getStringWidth(g.getCurrentFont(), name);
         const float ux = (float)(drumRect.getX() + 34);
         const float uy = (float)(drumRect.getY() + 24);
         g.setGradientFill(juce::ColourGradient(agm::ui::kAccent, ux, uy,

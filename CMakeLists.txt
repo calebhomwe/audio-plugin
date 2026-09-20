@@ -9,7 +9,13 @@ FetchContent_Declare(juce
     GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(juce)
 
-add_compile_definitions(JUCE_VST3_CAN_REPLACE_VST2=0)
+add_compile_definitions(JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+
+# Owner's Windows workflow copies the built plugin into the system VST3 folder.
+# Headless / CI builds turn this off: -DMIXAGENT_COPY_PLUGIN=OFF
+option(MIXAGENT_COPY_PLUGIN "Copy the plugin into the system plugin folder after build" ON)
+# Address/UB sanitizers on the headless test targets: -DMIXAGENT_SANITIZE=ON
+option(MIXAGENT_SANITIZE "Build the console test apps with -fsanitize=address,undefined" OFF)
 
 set(AGM_SOURCES
     Source/PluginProcessor.cpp
@@ -23,7 +29,7 @@ juce_add_plugin(MixAgent
     IS_SYNTH TRUE
     NEEDS_MIDI_INPUT TRUE
     NEEDS_MIDI_OUTPUT FALSE
-    COPY_PLUGIN_AFTER_BUILD TRUE
+    COPY_PLUGIN_AFTER_BUILD ${MIXAGENT_COPY_PLUGIN}
     FORMATS VST3 Standalone
     VERSION 1.0.0)
 
@@ -37,6 +43,8 @@ target_link_libraries(MixAgent PRIVATE
     juce::juce_gui_basics
     juce::juce_gui_extra
     juce::juce_audio_devices)
+
+enable_testing()
 
 juce_add_console_app(MixAgentSmokeTest)
 juce_generate_juce_header(MixAgentSmokeTest)
@@ -69,3 +77,12 @@ target_link_libraries(EditorProbe PRIVATE
     juce::juce_gui_basics
     juce::juce_gui_extra
     juce::juce_audio_devices)
+
+if(MIXAGENT_SANITIZE AND NOT MSVC)
+    foreach(t MixAgentSmokeTest EditorProbe)
+        target_compile_options(${t} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(${t} PRIVATE -fsanitize=address,undefined)
+    endforeach()
+endif()
+
+add_test(NAME MixAgentSmokeTest COMMAND MixAgentSmokeTest)
