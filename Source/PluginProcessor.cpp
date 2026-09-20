@@ -212,20 +212,126 @@ void MixAgentAudioProcessor::prepareToPlay(double sr, int blockSize)
     setLatencySamples(limiter.getLatencySamples() + saturator.getLatencySamples());
     skipModules.clear();
     skipModules.addTokens(juce::SystemStats::getEnvironmentVariable("AGM_SKIP", ""), " ", "");
+    runEq = !skipModules.contains("eq");
+    runSat = !skipModules.contains("sat");
+    runComp = !skipModules.contains("comp");
+    runImg = !skipModules.contains("img");
+    runDly = !skipModules.contains("dly");
+    runRvb = !skipModules.contains("rvb");
+    runLim = !skipModules.contains("lim");
+
+    synthSlice = juce::jmax(1, blockSize);
+    synthBus.setSize(2, synthSlice, false, false, true);
+    uiNoteFifo.reset();
 }
 
 void MixAgentAudioProcessor::releaseResources() {}
 
 void MixAgentAudioProcessor::uiNoteOn(int note, float velocity)
 {
-    const juce::ScopedLock sl(uiNoteLock);
-    uiNotes.addEvent(juce::MidiMessage::noteOn(1, note, velocity), 0);
+    int start1, size1, start2, size2;
+    uiNoteFifo.prepareToWrite(1, start1, size1, start2, size2);
+    if (size1 > 0)
+    {
+        uiNoteSlots[(size_t)start1] = { note, velocity, true };
+        uiNoteFifo.finishedWrite(1);
+    }
 }
 
 void MixAgentAudioProcessor::uiNoteOff(int note)
 {
-    const juce::ScopedLock sl(uiNoteLock);
-    uiNotes.addEvent(juce::MidiMessage::noteOff(1, note), 0);
+    int start1, size1, start2, size2;
+    uiNoteFifo.prepareToWrite(1, start1, size1, start2, size2);
+    if (size1 > 0)
+    {
+        uiNoteSlots[(size_t)start1] = { note, 0.0f, false };
+        uiNoteFifo.finishedWrite(1);
+    }
+}
+
+void MixAgentAudioProcessor::drainUiNotes()
+{
+    const int ready = uiNoteFifo.getNumReady();
+    if (ready <= 0)
+        return;
+    int start1, size1, start2, size2;
+    uiNoteFifo.prepareToRead(ready, start1, size1, start2, size2);
+    auto apply = [this](int start, int size)
+    {
+        for (int i = 0; i < size; ++i)
+        {
+            const auto& e = uiNoteSlots[(size_t)(start + i)];
+            handleMidiEvent(e.on ? juce::MidiMessage::noteOn(1, e.note, e.velocity)
+                                 : juce::MidiMessage::noteOff(1, e.note));
+        }
+    };
+    apply(start1, size1);
+    apply(start2, size2);
+    uiNoteFifo.finishedRead(size1 + size2);
+}
+
+void MixAgentAudioProcessor::handleMidiEvent(const juce::MidiMessage& msg)
+{
+    auto isDrumNote = [](int n) { return n >= 35 && n <= 49; };
+    if (msg.isNoteOn())
+    {
+        const int note = msg.getNoteNumber();
+        if (isDrumNote(note)) drumEngine.noteOn(note, msg.getFloatVelocity());
+        else instruments.noteOn(note, msg.getFloatVelocity());
+    }
+    else if (msg.isNoteOff())
+    {
+        const int note = msg.getNoteNumber();
+        if (isDrumNote(note)) drumEngine.noteOff(note, 0.0f);
+        else instruments.noteOff(note, 0.0f);
+    }
+    else if (msg.isPitchWheel())
+    {
+        const float norm = (float)(msg.getPitchWheelValue() - 8192) / 8192.0f;
+        instruments.setPitchBend(norm * kPitchBendRangeSemitones);
+    }
+    else if (msg.isSustainPedalOn())
+    {
+        instruments.setSustain(true);
+    }
+    else if (msg.isSustainPedalOff())
+    {
+        instruments.setSustain(false);
+    }
+    else if (msg.isAllNotesOff())
+    {
+        instruments.setSustain(false);
+        instruments.allNotesOff();
+    }
+    else if (msg.isAllSoundOff())
+    {
+        instruments.setSustain(false);
+        instruments.allSoundOff();
+        drumEngine.allNotesOff();
+    }
+}
+
+// Instruments + drums are summed on their own bus, soft-limited so a 24-voice
+// pile-up cannot hard-clip into the FX chain, then added to the host signal.
+void MixAgentAudioProcessor::renderSynthBus(juce::AudioBuffer<float>& buffer, int numCh, int start, int num)
+{
+    if (num <= 0 || synthBus.getNumSamples() <= 0)
+        return;
+    const int busCh = juce::jmin(2, numCh);
+    for (int pos = 0; pos < num; pos += synthSlice)
+    {
+        const int n = juce::jmin(synthSlice, num - pos);
+        synthBus.clear(0, n);
+        instruments.renderAdd(synthBus, busCh, 0, n);
+        drumEngine.renderAdd(synthBus, busCh, 0, n);
+        for (int ch = 0; ch < numCh; ++ch)
+        {
+            float* dst = buffer.getWritePointer(ch) + start + pos;
+            const float* src = synthBus.getReadPointer(juce::jmin(ch, busCh - 1));
+            for (int i = 0; i < n; ++i)
+                dst[i] += agm::softClipBus(src[i]);
+        }
+    }
 }
 
 void MixAgentAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
@@ -236,44 +342,21 @@ void MixAgentAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     if (numSamples == 0 || numCh == 0)
         return;
 
-    // instruments/drums render first: instrument bus feeds the FX chain
-    auto isDrumNote = [](int n) { return n >= 35 && n <= 49; };
+    // Instruments/drums render first (the instrument bus feeds the FX chain),
+    // with MIDI applied at each event's sample offset inside the block.
+    drainUiNotes();
+    int rendered = 0;
     for (const auto metadata : midiMessages)
     {
-        const auto msg = metadata.getMessage();
-        const int note = msg.getNoteNumber();
-        if (msg.isNoteOn())
+        const int at = juce::jlimit(0, numSamples, metadata.samplePosition);
+        if (at > rendered)
         {
-            if (isDrumNote(note)) drumEngine.noteOn(note, msg.getFloatVelocity());
-            else instruments.noteOn(note, msg.getFloatVelocity());
+            renderSynthBus(buffer, numCh, rendered, at - rendered);
+            rendered = at;
         }
-        else if (msg.isNoteOff())
-        {
-            if (isDrumNote(note)) drumEngine.noteOff(note, 0.0f);
-            else instruments.noteOff(note, 0.0f);
-        }
+        handleMidiEvent(metadata.getMessage());
     }
-    {
-        const juce::ScopedLock sl(uiNoteLock);
-        for (const auto metadata : uiNotes)
-        {
-            const auto msg = metadata.getMessage();
-            const int note = msg.getNoteNumber();
-            if (msg.isNoteOn())
-            {
-                if (isDrumNote(note)) drumEngine.noteOn(note, msg.getFloatVelocity());
-                else instruments.noteOn(note, msg.getFloatVelocity());
-            }
-            else if (msg.isNoteOff())
-            {
-                if (isDrumNote(note)) drumEngine.noteOff(note, 0.0f);
-                else instruments.noteOff(note, 0.0f);
-            }
-        }
-        uiNotes.clear();
-    }
-    instruments.renderAdd(buffer, numCh);
-    drumEngine.renderAdd(buffer, numCh);
+    renderSynthBus(buffer, numCh, rendered, numSamples - rendered);
 
     const float gainCoef = 1.0f - std::exp(-(float)numSamples / (0.010f * (float)sampleRate));
     const float inTarget = agm::dbToGain(inGainDb);
@@ -297,13 +380,13 @@ void MixAgentAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
 
     pushAnalyser(buffer);
 
-    if (!skipModules.contains("eq")) eq.process(buffer);
-    if (!skipModules.contains("sat")) saturator.process(buffer);
-    if (!skipModules.contains("comp")) compressor.process(buffer);
-    if (!skipModules.contains("img")) imager.process(buffer);
-    if (!skipModules.contains("dly")) delay.process(buffer);
-    if (!skipModules.contains("rvb")) reverb.process(buffer);
-    if (!skipModules.contains("lim")) limiter.process(buffer);
+    if (runEq) eq.process(buffer);
+    if (runSat) saturator.process(buffer);
+    if (runComp) compressor.process(buffer);
+    if (runImg) imager.process(buffer);
+    if (runDly) delay.process(buffer);
+    if (runRvb) reverb.process(buffer);
+    if (runLim) limiter.process(buffer);
 
     float outL = 0.0f, outR = 0.0f;
     g = outGainSmoothed;

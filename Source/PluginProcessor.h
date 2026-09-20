@@ -52,9 +52,14 @@ public:
     bool getInstrumentActive() const { return instruments.isActive(); }
     int getInstrumentProgram() const { return instruments.getProgram(); }
     void setInstrumentProgram(int p) { instruments.setProgram(p); }
+    int getInstrumentVoiceCount() const { return instruments.getActiveVoiceCount(); }
+    bool getDrumsActive() const { return drumEngine.isActive(); }
+    int getDrumVoiceCount() const { return drumEngine.getActiveVoiceCount(); }
+    static constexpr float kPitchBendRangeSemitones = 2.0f;
     bool isFavorite(int program) const;
     void setFavorite(int program, bool fav);
     int getFavoriteCount() const;
+    // Debug aid: AGM_SKIP="eq sat comp img dly rvb lim" (space separated) skips modules.
     juce::StringArray skipModules;
 
     // UI-driven triggers (message thread safe; drained on the audio thread)
@@ -89,8 +94,20 @@ private:
     std::atomic<float> outLevelL { 0.0f }, outLevelR { 0.0f };
     float inPeakL = 0.0f, inPeakR = 0.0f, outPeakL = 0.0f, outPeakR = 0.0f;
 
-    juce::CriticalSection uiNoteLock;
-    juce::MidiBuffer uiNotes;
+    // UI -> audio thread note events. Single producer (message thread), single
+    // consumer (audio thread); lock-free so processBlock never blocks on the GUI.
+    struct UiNoteEvent { int note = 0; float velocity = 0.0f; bool on = false; };
+    static constexpr int kUiNoteFifoSize = 128;
+    juce::AbstractFifo uiNoteFifo { kUiNoteFifoSize };
+    std::array<UiNoteEvent, kUiNoteFifoSize> uiNoteSlots {};
+
+    void handleMidiEvent(const juce::MidiMessage& msg);
+    void renderSynthBus(juce::AudioBuffer<float>& buffer, int numCh, int start, int num);
+    void drainUiNotes();
+
+    juce::AudioBuffer<float> synthBus;
+    int synthSlice = 0;
+    bool runEq = true, runSat = true, runComp = true, runImg = true, runDly = true, runRvb = true, runLim = true;
 
     static constexpr int kFftSize = 2048;
     static constexpr int kAnaBins = 600;
