@@ -24,3 +24,4 @@ _geoprobe.html
 .opencode/node_modules/
 
 tools/godot/
+build-asan/
