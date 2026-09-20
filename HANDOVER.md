@@ -31,6 +31,38 @@ Artifacts:
 
 Build dir: `buildDrum/` (generator `Visual Studio 18 2026` -A x64, Debug). Stale generator in cache = wipe `buildDrum` and rerun. Paths contain a space ("Default Project") — always wrap cmake in the .bat wrappers, never inline in PowerShell.
 
+## 2b. Linux / headless build + verification (added 2026-09-20)
+
+Everything in `CHANGELOG.md` was measured with this setup. Ninja, gcc 13 or clang 18, CMake ≥ 3.24.
+
+```bash
+# point FetchContent at a local JUCE 8.0.9 checkout (avoids the download), don't copy into system dirs
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DFETCHCONTENT_SOURCE_DIR_JUCE=/path/to/JUCE-8.0.9 -DMIXAGENT_COPY_PLUGIN=OFF
+cmake --build build -j3 --target MixAgentSmokeTest && ./build/MixAgentSmokeTest_artefacts/Release/MixAgentSmokeTest
+ctest --test-dir build                          # same test, registered with CTest
+cmake --build build -j3 --target MixAgent_VST3   # the plugin itself
+cmake --build build -j3 --target EditorProbe && xvfb-run ./build/EditorProbe_artefacts/Release/EditorProbe
+# sanitizers on the test apps:
+cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DMIXAGENT_SANITIZE=ON \
+      -DFETCHCONTENT_SOURCE_DIR_JUCE=/path/to/JUCE-8.0.9 -DMIXAGENT_COPY_PLUGIN=OFF
+```
+
+- `MIXAGENT_COPY_PLUGIN` defaults to ON, so the Windows `.bat` workflow above is unchanged.
+- Smoke test: **137 checks** (was 30). Suites: original, latency (impulse vs `getLatencySamples()`),
+  real-time safety (`operator new` counter around `processBlock`, lock-free UI FIFO), robustness
+  (NaN/Inf, 44.1–192 kHz × block sizes 1–4096, mono), instruments (release/exact-zero per program,
+  retrigger + steal clicks, 24-voice bound, sample-accurate MIDI, pitch bend, sustain, CC120/123),
+  drums (note map, tails, round-robin), FX (EQ dB accuracy, compressor ratio/attack/release, imager
+  mono, delay decay + click-free time changes, reverb decay, limiter ceiling/true-peak/transparency),
+  state (58-parameter exact round-trip, garbage/older state, all presets).
+- MIDI now handled: sample-accurate note on/off, pitch bend (±2 st), CC64 sustain, CC120, CC123.
+  UI notes go through `juce::AbstractFifo` (no lock on the audio thread).
+- Behaviour changes to be aware of: compressor attack/release now actually follow the knobs (they
+  were instantaneous); Saturation bypass is delayed by its oversampler latency (constant PDC);
+  the instrument/drum bus is soft-limited to ±1.0 before the FX chain; the six newer programs
+  (Dark Bell … Rage) have real envelopes/filters instead of the default raw saw.
+
 ## 3. File map
 
 | File | Role |
@@ -43,7 +75,7 @@ Build dir: `buildDrum/` (generator `Visual Studio 18 2026` -A x64, Debug). Stale
 | `Source/UI/PadGrid.h` | 12-pad chromatic preview keyboard (C3–B3), mouse triggers `proc.uiNoteOn`, blinks on `getInstrumentActive()` |
 | `Source/UI/{Knob,Meter,Spectrum,Style}.h` | Custom widgets, `agm::ui::` namespace |
 | `Source/PluginEditor.h/.cpp` | 1160×900. Top bar + EQ section (spectrum + 7 knob columns) + 6 FX panels + bottom **INSTRUMENT LIBRARY** strip (power, program ComboBox, level knob, keyboard). `fullyBuilt` guard + explicit `resized()` at ctor end (see §7 FIXED) |
-| `Tests/SmokeTest.cpp` | 16 `check()` sites, 30 executed (per-program loop ×16 programs): FX transparency/EQ/comp/lim, state roundtrip, favorites save/load, oversized-block regression, all 16 programs finite+bounded |
+| `Tests/SmokeTest.cpp` | 137 checks (see §2b): FX measurements, latency, RT-safety, instruments, drums, state. Run after ANY DSP change |
 | `Tests/EditorProbe.cpp` + `tools/build_probe.bat` + CMakeLists `EditorProbe` target | Editor smoke test: constructs editor & drives resize, catching the resized()-before-members crash class. `cmd /c "tools\build_probe.bat"` → `buildDrum\EditorProbe_artefacts\Debug\EditorProbe.exe` |
 | `tools/build_smoke.bat`, `tools/build_plugin.bat` | Verified build wrappers (vcvars + cmake, space-safe) |
 | `tools/build_assets.ps1` | **WIP, don't trust yet** — asset extraction/manifest from earlier plan |
@@ -58,13 +90,13 @@ Host input ──→ InGain ──→ EQ ─→ Sat ─→ Comp ─→ Imager �
                               (instruments feed the chain like an insert)
 ```
 
-- MIDI: `acceptsMidi()=true`, parsed in `processBlock` (host + UI queue drained under lock).
-- UI notes: editor → `proc.uiNoteOn/Off` → `MidiBuffer` under `CriticalSection` → drained on audio thread. Never write DSP state from UI thread directly.
+- MIDI: `acceptsMidi()=true`, applied sample-accurately in `processBlock` (synth bus rendered in sub-blocks between events); pitch bend ±2 st, CC64 sustain, CC120/123 handled.
+- UI notes: editor → `proc.uiNoteOn/Off` → lock-free `juce::AbstractFifo` → drained on the audio thread at block start. Never write DSP state from UI thread directly.
 - Presets (12, via program change): 0–5 FX-only (Init, Clean Master, Vocal Presence, Drum Bus Punch, Wide & Spacey, Warm Tape); **6–11 trap subgenre combos** (Drill Bell, Rage Lead, Jersey Keys, Plugg Pad, BoomBap EP, Sub Glue) = `inst_program` + tuned FX chain. Note: FX presets don't reset instrument state (they layer).
 
 ## 5. Test status
 
-`MixAgentSmokeTest.exe` → **30/30 PASS** as of this handover (16 check sites; the per-program loop runs 16 checks). Run it after ANY DSP change. It's fast (~2s).
+`MixAgentSmokeTest` → **137/137 PASS** (2026-09-20, Linux; was 30/30). Run it after ANY DSP change. It's fast (~2 s). Details and open items: `CHANGELOG.md`.
 
 ## 6. Legal (frozen decisions — do not re-litigate)
 
