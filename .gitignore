@@ -25,3 +25,4 @@ _geoprobe.html
 
 tools/godot/
 build-asan/
+build-ci/

@@ -49,15 +49,17 @@ cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DMIXAGENT_S
 ```
 
 - `MIXAGENT_COPY_PLUGIN` defaults to ON, so the Windows `.bat` workflow above is unchanged.
-- Smoke test: **137 checks** (was 30). Suites: original, latency (impulse vs `getLatencySamples()`),
+- CI: `.github/workflows/ci.yml` runs the same steps on every push/PR (ubuntu-24.04, cached JUCE).
+- Smoke test: **151 checks** (was 30); EditorProbe: 9 checks (ComboBox/knob/toggle ↔ parameter mapping). Suites: original, latency (impulse vs `getLatencySamples()`),
   real-time safety (`operator new` counter around `processBlock`, lock-free UI FIFO), robustness
   (NaN/Inf, 44.1–192 kHz × block sizes 1–4096, mono), instruments (release/exact-zero per program,
   retrigger + steal clicks, 24-voice bound, sample-accurate MIDI, pitch bend, sustain, CC120/123),
   drums (note map, tails, round-robin), FX (EQ dB accuracy, compressor ratio/attack/release, imager
   mono, delay decay + click-free time changes, reverb decay, limiter ceiling/true-peak/transparency),
   state (58-parameter exact round-trip, garbage/older state, all presets).
-- MIDI now handled: sample-accurate note on/off, pitch bend (±2 st), CC64 sustain, CC120, CC123.
-  UI notes go through `juce::AbstractFifo` (no lock on the audio thread).
+- MIDI now handled: sample-accurate note on/off, pitch bend (±2 st), CC64 sustain, CC120, CC123,
+  program change 0–15 → instrument program. Drums: MIDI channel 10 (any note) or notes 35–49 on
+  other channels. UI pads always play the instrument and go through `juce::AbstractFifo` (no lock).
 - Behaviour changes to be aware of: compressor attack/release now actually follow the knobs (they
   were instantaneous); Saturation bypass is delayed by its oversampler latency (constant PDC);
   the instrument/drum bus is soft-limited to ±1.0 before the FX chain; the six newer programs
@@ -75,7 +77,7 @@ cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DMIXAGENT_S
 | `Source/UI/PadGrid.h` | 12-pad chromatic preview keyboard (C3–B3), mouse triggers `proc.uiNoteOn`, blinks on `getInstrumentActive()` |
 | `Source/UI/{Knob,Meter,Spectrum,Style}.h` | Custom widgets, `agm::ui::` namespace |
 | `Source/PluginEditor.h/.cpp` | 1160×900. Top bar + EQ section (spectrum + 7 knob columns) + 6 FX panels + bottom **INSTRUMENT LIBRARY** strip (power, program ComboBox, level knob, keyboard). `fullyBuilt` guard + explicit `resized()` at ctor end (see §7 FIXED) |
-| `Tests/SmokeTest.cpp` | 137 checks (see §2b): FX measurements, latency, RT-safety, instruments, drums, state. Run after ANY DSP change |
+| `Tests/SmokeTest.cpp` | 151 checks (see §2b): FX measurements, latency, RT-safety, instruments, drums, state. Run after ANY DSP change |
 | `Tests/EditorProbe.cpp` + `tools/build_probe.bat` + CMakeLists `EditorProbe` target | Editor smoke test: constructs editor & drives resize, catching the resized()-before-members crash class. `cmd /c "tools\build_probe.bat"` → `buildDrum\EditorProbe_artefacts\Debug\EditorProbe.exe` |
 | `tools/build_smoke.bat`, `tools/build_plugin.bat` | Verified build wrappers (vcvars + cmake, space-safe) |
 | `tools/build_assets.ps1` | **WIP, don't trust yet** — asset extraction/manifest from earlier plan |
@@ -84,8 +86,8 @@ cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DMIXAGENT_S
 ## 4. Audio flow
 
 ```
-MIDI noteOn ──┬─ note 35–49 → DrumEngine   ─┐
-              └─ everything else → InstrumentBank ─→ renderAdd() into host buffer (pre-FX)
+MIDI noteOn ──┬─ channel 10, or note 35–49 on other channels → DrumEngine ─┐
+              └─ everything else (and all UI pads) → InstrumentBank ─→ synth bus (soft-limited) → added pre-FX
 Host input ──→ InGain ──→ EQ ─→ Sat ─→ Comp ─→ Imager ─→ Delay ─→ Reverb ─→ Limiter ─→ OutGain ─→ out
                               (instruments feed the chain like an insert)
 ```
@@ -96,7 +98,7 @@ Host input ──→ InGain ──→ EQ ─→ Sat ─→ Comp ─→ Imager �
 
 ## 5. Test status
 
-`MixAgentSmokeTest` → **137/137 PASS** (2026-09-20, Linux; was 30/30). Run it after ANY DSP change. It's fast (~2 s). Details and open items: `CHANGELOG.md`.
+`MixAgentSmokeTest` → **151/151 PASS**, `EditorProbe` 9/9 (2026-09-20, Linux; was 30/30). Run it after ANY DSP change. It's fast (~2 s). Details and open items: `CHANGELOG.md`.
 
 ## 6. Legal (frozen decisions — do not re-litigate)
 

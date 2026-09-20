@@ -1,5 +1,50 @@
 # Changelog
 
+## 2026-09-20 (wave 2) — refinements, CI
+
+All measured with `Tests/SmokeTest.cpp` (now 151 checks) and `Tests/EditorProbe.cpp` (9 checks).
+
+- **Limiter is now a true-peak limiter** (`Source/DSP/Limiter.h`). A 4-phase polyphase
+  windowed-sinc interpolator (128-tap prototype) feeds the gain computer, so inter-sample peaks
+  are limited. The sidechain runs 16 samples behind the input and the attack is clamped to the
+  remaining lookahead, so the audio-path latency and `setLatencySamples()` are unchanged. The
+  interpolated estimate carries 0.15 dB of headroom against sharper measurement filters.
+  VERIFIED at 4× with a −1 dB ceiling: hard-clipped square +1.06 → **−1.04 dBTP**, sine bursts
+  −1.09 → −1.17 dBTP, sample peak still exactly at the ceiling, transparent below it.
+- **Voice lifecycle** (`InstrumentBank.h`): released voices end at −96 dB or at
+  max(3 × release, 2 s) after note-off, where a linear fade (release/2, clamped 50 ms…1 s) takes
+  the envelope to exactly zero. VERIFIED with a 24-voice Pad chord released and rendered for
+  20 s: tail 11.09 s → 5.25 s, 266 → 126 voice-seconds, ~400 → ~330 ms CPU for the 20 s
+  (wall-clock numbers are noisy on a shared box; voice-seconds are deterministic), largest
+  sample step at the free point 6.6e-5 (no click). Per program the tail now ends 1.75–5.25 s
+  after release (was 1.25–10 s).
+- **MIDI program change** 0–15 selects the instrument program at its sample offset (audio
+  thread); the `inst_program` parameter follows on the message thread. VERIFIED: PC at offset
+  256 + note at 300 renders bit-identically to a processor already on the new program; the
+  parameter reads the new program after the message loop runs; PC on channel 10 is ignored.
+- **Host preset index is saved** (`hostProgram` attribute on the state XML) and restored without
+  re-applying the preset; older states without it load as preset 0 as before. VERIFIED.
+- **Drums on MIDI channel 10** (GM convention) in addition to the legacy 35–49 range on other
+  channels; GM-style map (toms/bongos → kick family, crashes/clap/side stick → snare family,
+  hats/rides/percussion → cymbal). VERIFIED: every note 35–61 on channel 10 renders; 57 = crash
+  (zero-crossing rate 3.4 kHz), 60 = drum hit (125 Hz); note 57 on channel 1 still plays the
+  instrument. **UI pads never hit the drum range any more**: the preview keyboard is C3–B3
+  (48–59) and pads C/C# (48/49) used to play a tom/crash instead of the instrument.
+- **Reverb decay knob — measured, documented, not changed.** RT60 at decay 0.5 / damp 0.5:
+  200 Hz 0.50 s, 1 kHz 0.37 s, 5 kHz 0.30 s; damp 0: 1 kHz 0.53 s, 5 kHz 0.51 s; decay 2.0 /
+  damp 0.5 @200 Hz 2.27 s. So Decay is the low-frequency RT60 (within 15 %) and Damp shortens
+  the highs by up to ~40 % at 0.5 — which is what a damping control is for. Making the knob a
+  1 kHz reference would push the LF decay above the knob value and hit the 0.999 feedback clamp
+  at high damping, so the honest option is to keep it and state it. Asserted in the suite.
+  (Corrects the wave-1 note that claimed "~4× faster at 1 kHz": that was INFERRED and wrong.)
+- **EditorProbe** now drives the UI: program ComboBox → `inst_program` and back, all 42 knobs
+  (parked at min, driven to max: exactly one parameter reaches its maximum each time), all 12
+  toggles (11 drive a parameter, FAV is state). Registered with CTest under `xvfb-run`.
+- **CI**: `.github/workflows/ci.yml` (ubuntu-24.04, cached JUCE 8.0.9 clone, Release/Ninja,
+  builds `MixAgentSmokeTest` + `EditorProbe` + `MixAgent_VST3`, `ctest`, editor probe under
+  xvfb). Dry-run of every step in a fresh `build-ci` directory on the verification box: see
+  the PR.
+
 ## 2026-09-20 — headless verification pass (Linux, JUCE 8.0.9)
 
 Everything below was measured with `Tests/SmokeTest.cpp` (137 checks, ~1.7 s, registered
@@ -89,21 +134,15 @@ names are unchanged, so existing sessions keep loading.
 
 ### Known / open
 
-- The limiter is a sample-peak limiter: on a hard-clipped square wave the 4× true peak
-  reaches +1.06 dBTP with a −1 dB ceiling (inter-sample overshoot). Sine material stays within
-  the ceiling. A true-peak detector would need an oversampled sidechain.
-- Reverb "decay" is the low-frequency RT60; with Damp 0.5 a 1 kHz tail decays ~4× faster
-  (Freeverb-style). Musically normal, but the knob label is optimistic for bright material.
-- Release times are exponential time constants: a voice stays allocated until its level falls
-  below −66 dB, i.e. ~7.6× the nominal release (Pad: 10 s). Stealing such a tail is now
-  click-free, so this is a CPU/polyphony consideration only.
-- MIDI program change messages are not mapped to instrument programs (host programs / the
-  `inst_program` parameter do that). INFERRED design choice, unchanged.
-- DrumEngine's note map entries for 57 (snare) and 60 (kick) are unreachable: the processor
-  only routes notes 35–49 to the drums. 49 (GM crash) is rendered as a snare — documented
-  behaviour, left alone.
-- Current program index (`getCurrentProgram`) is not part of the saved state (only the
-  parameters are), so a reloaded session shows preset 0 while the parameters are correct.
-- `PadGrid.h` has three signed/unsigned comparison warnings (GUI only, harmless).
+- ~~Sample-peak limiter~~ → true-peak sidechain (wave 2). Remaining: the true-peak estimate is
+  a 4× interpolation; signals engineered against it could still exceed the ceiling by a
+  fraction of a dB between samples.
+- Reverb Decay = low-frequency RT60; Damp shortens the highs (measured above). Documented, not
+  changed.
+- ~~Release tails hog voices for ~7.6× the release~~ → bounded at max(3× release, 2 s) (wave 2).
+- ~~MIDI program change not mapped~~ → mapped (wave 2).
+- ~~Drum map entries 57/60 unreachable~~ → channel 10 routes the whole map (wave 2). Notes
+  35–49 on other channels still go to the drums for compatibility with earlier sessions.
+- ~~Current program index not saved~~ → saved (wave 2).
 - Not verifiable headless: DAW behaviour, pluginval, sound design judgement of the six new
   recipes (they are synthesised, license-clean, and measured for click-free envelopes only).
