@@ -65,15 +65,6 @@ static void check(bool ok, const char* name)
 
 static void check(bool ok, const std::string& name) { check(ok, name.c_str()); }
 
-static bool allFinite(const AudioBuffer<float>& b)
-{
-    for (int ch = 0; ch < b.getNumChannels(); ++ch)
-        for (int i = 0; i < b.getNumSamples(); ++i)
-            if (!std::isfinite(b.getSample(ch, i)))
-                return false;
-    return true;
-}
-
 static float peakOf(const AudioBuffer<float>& b)
 {
     float p = 0.0f;

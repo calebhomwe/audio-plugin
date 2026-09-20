@@ -52,6 +52,11 @@ names are unchanged, so existing sessions keep loading.
   stage (distortion instead of gain riding). Added a hold of `delaySamples` after each reduction.
   VERIFIED: +6 dBFS sine → output RMS = ceiling − 3.02 dB (clean gain riding), sample peak never
   above the ceiling, transparent below it (0.05 dB), 4× true peak on sine bursts −1.09 dBTP.
+- **Reverb pre-delay read one float past its buffer** (`Source/DSP/Reverb.h`,
+  `PreDelay::next`). Found by AddressSanitizer: the smoothed pre-delay settles at a tiny
+  positive value, `wIdx - 1e-7` rounds to `wIdx` in float and after the `+ maxLen` wrap to
+  `maxLen` itself, one past the buffer. The integer index is now wrapped explicitly. VERIFIED:
+  the whole suite runs clean under `-fsanitize=address,undefined` (137/137, 7.3 s).
 - **Drum note map**: GM 42 (closed hat) was rendered as an open hat. Fixed (46 stays open).
 - **Instrument/drum bus soft limiter** (`agm::softClipBus`, `Common.h`): the synth sum is now
   bounded to ±1.0 (unity below 0.85) before it enters the FX chain, so a 24-voice pile-up at
@@ -77,6 +82,10 @@ names are unchanged, so existing sessions keep loading.
   empty, truncated, foreign-tag and "older" (missing `inst_*`, unknown extra param) state
   neither crash nor half-apply; all 12 factory presets load and render.
 - Denormal protection is a named `juce::ScopedNoDenormals noDenormals;` (engaged).
+- Linux build (gcc 13, `-Wall -Wextra`): `MixAgentSmokeTest`, `EditorProbe` and `MixAgent_VST3`
+  build with 0 warnings from this repo's sources (JUCE's own deprecation notes aside).
+  `EditorProbe` constructs the editor, resizes it 1160×920 → 900×700 → 1160×920 and renders a
+  snapshot under `xvfb-run` (exit 0).
 
 ### Known / open
 

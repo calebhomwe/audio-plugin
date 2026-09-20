@@ -137,11 +137,19 @@ private:
         float next(float in, float delayF)
         {
             buf[(size_t)wIdx] = in;
-            float rp = (float)wIdx - delayF;
+            // delayF is a smoothed value and can sit at e.g. 1e-7: wIdx - 1e-7 rounds
+            // to wIdx in float, and after the "+ maxLen" wrap it rounds to maxLen
+            // itself, one past the buffer (found by AddressSanitizer). Wrap on the
+            // integer index instead of trusting the float.
+            float rp = (float)wIdx - (delayF > 0.0f ? delayF : 0.0f);
             if (rp < 0.0f)
                 rp += (float)maxLen;
-            const int i0 = (int)rp;
-            const float f = rp - (float)i0;
+            int i0 = (int)rp;
+            if (i0 >= maxLen)
+                i0 -= maxLen;
+            if (i0 < 0)
+                i0 = 0;
+            const float f = juce::jlimit(0.0f, 1.0f, rp - (float)i0);
             int i1 = i0 + 1;
             if (i1 >= maxLen)
                 i1 = 0;
