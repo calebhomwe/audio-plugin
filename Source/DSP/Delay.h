@@ -18,7 +18,8 @@ public:
         leftLine.assign(maxSamples, 0.0f);
         rightLine.assign(maxSamples, 0.0f);
         const float srF = static_cast<float>(sr);
-        timeCoef = 1.0f - std::exp(-1.0f / (0.020f * srF));
+        fadeInc = 1.0f / (0.030f * srF);   // 30 ms equal-power crossfade on time changes
+        modCoef = 1.0f - std::exp(-1.0f / (0.100f * srF));
         mixCoef = 1.0f - std::exp(-1.0f / (0.010f * srF));
         fbCoef = 1.0f - std::exp(-1.0f / (0.012f * srF));
         widthCoef = fbCoef;
@@ -36,7 +37,10 @@ public:
             std::fill(rightLine.begin(), rightLine.end(), 0.0f);
         }
         writeIndex = 0;
-        smoothTimeSamples = targetTimeSamples;
+        modDepthCur = modulationDepthSamples();
+        curTimeSamples = targetTimeSamples;
+        oldTimeSamples = targetTimeSamples;
+        fade = 1.0f;
         smoothMix = targetMix;
         smoothFb = feedbackGain;
         smoothWidth = width;
@@ -66,11 +70,18 @@ public:
         const float dampCoef = dampingCoef;
         const float oneMinusDamp = 1.0f - dampCoef;
         const float maxDist = sizeF - 4.0f;
-        const float modDepth = modulationDepthSamples();
+        const float modDepthTarget = modulationDepthSamples();
 
         for (int i = 0; i < numSamples; ++i)
         {
-            smoothTimeSamples += (targetTimeSamples - smoothTimeSamples) * timeCoef;
+            // Time changes: start a crossfade from the old read head to the new one.
+            // No slewing read pointer, so no pitch zip and no discontinuity.
+            if (fade >= 1.0f && targetTimeSamples != curTimeSamples)
+            {
+                oldTimeSamples = curTimeSamples;
+                curTimeSamples = targetTimeSamples;
+                fade = 0.0f;
+            }
             smoothMix += (targetMix - smoothMix) * mixCoef;
             smoothFb += (feedbackGain - smoothFb) * fbCoef;
             smoothWidth += (width - smoothWidth) * widthCoef;
@@ -83,19 +94,45 @@ public:
             const float sameGain = smoothFb * (1.0f - smoothWidth);
             const float crossGain = smoothFb * smoothWidth;
 
-            float dist = smoothTimeSamples + std::sin(lfoPhase) * modDepth;
-            if (dist < 2.0f)
-                dist = 2.0f;
-            else if (dist > maxDist)
-                dist = maxDist;
-            float readPos = static_cast<float>(writeIndex) - dist;
-            if (readPos < 0.0f)
-                readPos += sizeF;
+            // modulation depth follows the delay time; slew it so a time change
+            // cannot jump the read position (that was an audible click)
+            modDepthCur += (modDepthTarget - modDepthCur) * modCoef;
+            const float lfo = std::sin(lfoPhase) * modDepthCur;
+            auto readPosFor = [&](float timeSamples)
+            {
+                float dist = timeSamples + lfo;
+                if (dist < 2.0f)
+                    dist = 2.0f;
+                else if (dist > maxDist)
+                    dist = maxDist;
+                float rp = static_cast<float>(writeIndex) - dist;
+                if (rp < 0.0f)
+                    rp += sizeF;
+                return rp;
+            };
+            const float readPos = readPosFor(curTimeSamples);
+            float gNew = 1.0f, gOld = 0.0f, readPosOld = readPos;
+            const bool fading = fade < 1.0f;
+            if (fading)
+            {
+                readPosOld = readPosFor(oldTimeSamples);
+                const float a = fade * juce::MathConstants<float>::halfPi;
+                gNew = std::sin(a);
+                gOld = std::cos(a);
+                fade += fadeInc;
+                if (fade > 1.0f)
+                    fade = 1.0f;
+            }
+            auto readHead = [&](const std::vector<float>& line)
+            {
+                const float v = readCubic(line, readPos, size);
+                return fading ? v * gNew + readCubic(line, readPosOld, size) * gOld : v;
+            };
 
             float inL = leftPtr[i];
             if (!std::isfinite(inL))
                 inL = 0.0f;
-            const float delayedL = readCubic(leftLine, readPos, size);
+            const float delayedL = readHead(leftLine);
 
             if (mono)
             {
@@ -109,7 +146,7 @@ public:
                 float inR = rightPtr[i];
                 if (!std::isfinite(inR))
                     inR = 0.0f;
-                const float delayedR = readCubic(rightLine, readPos, size);
+                const float delayedR = readHead(rightLine);
                 const float dampedL = delayedL * dampCoef + lpStateL * oneMinusDamp;
                 const float dampedR = delayedR * dampCoef + lpStateR * oneMinusDamp;
                 lpStateL = dampedL;
@@ -202,8 +239,12 @@ private:
     int writeIndex = 0;
     float timeMs = 500.0f;
     float targetTimeSamples = 22050.0f;
-    float smoothTimeSamples = 22050.0f;
-    float timeCoef = 0.0f;
+    float curTimeSamples = 22050.0f;
+    float oldTimeSamples = 22050.0f;
+    float fade = 1.0f;
+    float fadeInc = 0.001f;
+    float modDepthCur = 0.0f;
+    float modCoef = 0.001f;
     float targetMix = 0.5f;
     float smoothMix = 0.5f;
     float mixCoef = 0.0f;

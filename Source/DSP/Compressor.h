@@ -144,8 +144,9 @@ private:
     void updateCoefs()
     {
         const double fs = sr > 0.0 ? sr : 44100.0;
-        attackCoef = (float)std::exp(-1.0 / (attackMs * 0.001 * fs));
-        releaseCoef = (float)std::exp(-1.0 / (releaseMs * 0.001 * fs));
+        // one-pole step coefficients: env += coef * (target - env)
+        attackCoef = (float)(1.0 - std::exp(-1.0 / (attackMs * 0.001 * fs)));
+        releaseCoef = (float)(1.0 - std::exp(-1.0 / (releaseMs * 0.001 * fs)));
         rmsCoef = (float)(1.0 - std::exp(-1.0 / (8.0 * 0.001 * fs)));
         mixCoef = (float)(1.0 - std::exp(-1.0 / (10.0 * 0.001 * fs)));
         mkCoef = (float)(1.0 - std::exp(-1.0 / (15.0 * 0.001 * fs)));

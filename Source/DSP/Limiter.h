@@ -48,6 +48,7 @@ public:
         const float grC = grCoef;
 
         float env = currentGain;
+        int hold = holdCount;
         float grMeter = grSmoother.load(std::memory_order_relaxed);
 
         for (int i = 0; i < numSamples; ++i)
@@ -74,6 +75,11 @@ public:
                 env -= down;
                 if (env < req)
                     env = req;
+                hold = delaySamples;   // keep the gain down until this peak has left the delay line
+            }
+            else if (hold > 0)
+            {
+                --hold;
             }
             else
             {
@@ -114,6 +120,7 @@ public:
         }
 
         currentGain = std::isfinite(env) ? juce::jlimit(0.0f, 1.0f, env) : 1.0f;
+        holdCount = hold;
         grSmoother.store(std::isfinite(grMeter) ? grMeter : 0.0f, std::memory_order_relaxed);
     }
 
@@ -159,6 +166,7 @@ private:
             line.fill(0.0f);
         writePos.fill(0);
         currentGain = 1.0f;
+        holdCount = 0;
         grSmoother.store(0.0f, std::memory_order_relaxed);
     }
 
@@ -173,6 +181,7 @@ private:
     float upSlope = 0.0001f;
     float grCoef = 0.0f;
     float currentGain = 1.0f;
+    int holdCount = 0;
     std::atomic<float> grSmoother{ 0.0f };
     bool enabled = true;
     SmoothBypass bypass;

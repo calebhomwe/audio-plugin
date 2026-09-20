@@ -4,6 +4,7 @@
 #include "Biquad.h"
 #include <cmath>
 #include <algorithm>
+#include <array>
 
 namespace agm {
 
@@ -18,6 +19,11 @@ public:
         oversampler.initProcessing(static_cast<size_t>(maxSamples));
         osMaxBlock = static_cast<size_t>(maxSamples);
         oversampler.reset();
+        // The FIR half-band stages have an integer group delay; the bypass path
+        // reproduces exactly that delay so the module's latency never changes.
+        latency = (int)std::lround(oversampler.getLatencyInSamples());
+        jassert(std::abs(oversampler.getLatencyInSamples() - (float)latency) < 1.0e-3f);
+        jassert(latency < kMaxLatency);
         tapeLP[0].prepare(osRate);
         tapeLP[1].prepare(osRate);
         exciterHP[0].prepare(osRate);
@@ -46,23 +52,26 @@ public:
         mixSmooth.snapTo(mix);
         modeMixSmooth.snapTo(1.0f);
         bypass.prepare(osRate);
+        for (auto& r : dryRing) r.fill(0.0f);
+        ringPos = 0;
+        wasFullyOff = bypass.fullyOff();
     }
 
-    int getLatencySamples() const { return oversampler.getLatencyInSamples(); }
+    int getLatencySamples() const { return latency; }
 
     void process(juce::AudioBuffer<float>& buffer)
     {
         const int numSamples = buffer.getNumSamples();
         const int numChannels = buffer.getNumChannels();
-        if (numSamples <= 0 || numChannels <= 0)
+        if (numSamples <= 0 || numChannels <= 0 || workBuffer.getNumSamples() <= 0)
             return;
 
         const bool fullyOff = bypass.fullyOff() || (mix == 0.0f && mixSmooth.settled());
+
         if (fullyOff)
         {
             if (!wasFullyOff)
             {
-                oversampler.reset();
                 tapeLP[0].reset();
                 tapeLP[1].reset();
                 exciterHP[0].reset();
@@ -71,40 +80,96 @@ public:
                 dcServo[1] = 0.0f;
                 wasFullyOff = true;
             }
-            for (int ch = 0; ch < numChannels && ch < 2; ++ch)
+            // Bit-exact pass-through, delayed by the oversampler's latency so the
+            // host's compensation stays valid whether the module is on or off.
+            const int chans = juce::jmin(numChannels, 2);
+            if (latency <= 0)
+                return;
+            for (int i = 0; i < numSamples; ++i)
             {
-                float* p = buffer.getWritePointer(ch);
-                for (int i = 0; i < numSamples; ++i)
-                    if (!std::isfinite(p[i]))
-                        p[i] = 0.0f;
+                const int rp = ringPos;
+                for (int ch = 0; ch < chans; ++ch)
+                {
+                    float* p = buffer.getWritePointer(ch) + i;
+                    const float in = std::isfinite(*p) ? *p : 0.0f;
+                    auto& ring = dryRing[(size_t)ch];
+                    *p = ring[(size_t)rp];
+                    ring[(size_t)rp] = in;
+                }
+                ringPos = (rp + 1 < latency) ? rp + 1 : 0;
             }
             return;
         }
-        wasFullyOff = false;
 
-        if (static_cast<size_t>(numSamples) > osMaxBlock)
+        if (wasFullyOff)
         {
-            oversampler.initProcessing(static_cast<size_t>(numSamples));
-            osMaxBlock = static_cast<size_t>(numSamples);
+            // Re-engaging: the FIR state is empty while the ring holds the last
+            // `latency` input samples. Run that history through the oversampler
+            // (output discarded) so the switch is seamless instead of a 1 ms gap.
+            wasFullyOff = false;
+            oversampler.reset();
+            primeFromRing(numChannels);
         }
 
-        const int chunk = (int)std::min<size_t>((size_t)numSamples, maxSamplesToProcess);
+        // Hosts may deliver blocks larger than the size promised in prepare();
+        // process in slices no larger than what the oversampler was sized for,
+        // so nothing is (re)allocated on the audio thread.
+        const int chunk = (int)std::min<size_t>((size_t)numSamples, osMaxBlock);
         for (int base = 0; base < numSamples; base += chunk)
         {
             const int n = std::min(chunk, numSamples - base);
-            processChunk(buffer, numChannels, base, n);
+            // keep the dry ring current so a later bypass continues seamlessly
+            for (int i = 0; i < n; ++i)
+            {
+                const int rp = ringPos;
+                dryRing[0][(size_t)rp] = buffer.getReadPointer(0)[base + i];
+                dryRing[1][(size_t)rp] = buffer.getReadPointer(numChannels > 1 ? 1 : 0)[base + i];
+                ringPos = (rp + 1 < latency) ? rp + 1 : 0;
+            }
+            processChunk(buffer, numChannels, base, n, false);
         }
     }
 
-    void processChunk(juce::AudioBuffer<float>& buffer, int numChannels, int base, int numSamples)
+    void primeFromRing(int numChannels)
     {
-        if (workBuffer.getNumSamples() < numSamples)
-            workBuffer.setSize(2, numSamples, false, false, true);
+        const int slice = (int)osMaxBlock;
+        for (int done = 0; done < latency; done += slice)
+        {
+            const int n = juce::jmin(slice, latency - done);
+            for (int i = 0; i < n; ++i)
+            {
+                // oldest sample first: ring[ringPos] is the oldest of the last `latency`
+                const int idx = (ringPos + done + i) % latency;
+                workBuffer.getWritePointer(0)[i] = dryRing[0][(size_t)idx];
+                workBuffer.getWritePointer(1)[i] = dryRing[1][(size_t)idx];
+            }
+            juce::dsp::AudioBlock<float> blk(workBuffer);
+            auto sub = blk.getSubBlock(0, (size_t)n);
+            oversampler.processSamplesUp(sub);
+            juce::ignoreUnused(numChannels);
+            oversampler.processSamplesDown(sub);   // output discarded (workBuffer is scratch)
+        }
+    }
 
-        juce::FloatVectorOperations::copy(workBuffer.getWritePointer(0), buffer.getReadPointer(0) + base, numSamples);
-        juce::FloatVectorOperations::copy(workBuffer.getWritePointer(1),
-                                          numChannels > 1 ? buffer.getReadPointer(1) + base : buffer.getReadPointer(0) + base,
-                                          numSamples);
+    void processChunk(juce::AudioBuffer<float>& buffer, int numChannels, int base, int numSamples, bool shapingOff)
+    {
+        jassert(numSamples <= workBuffer.getNumSamples());
+        const float* srcL = buffer.getReadPointer(0) + base;
+        const float* srcR = (numChannels > 1 ? buffer.getReadPointer(1) : buffer.getReadPointer(0)) + base;
+        float* wL = workBuffer.getWritePointer(0);
+        float* wR = workBuffer.getWritePointer(1);
+        bool poisoned = false;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            // NaN/Inf must never enter the FIR state: scrub on the way in.
+            const float l = srcL[i], r = srcR[i];
+            const bool ok = std::isfinite(l) && std::isfinite(r);
+            poisoned |= !ok;
+            wL[i] = std::isfinite(l) ? l : 0.0f;
+            wR[i] = std::isfinite(r) ? r : 0.0f;
+        }
+        if (poisoned)
+            oversampler.reset();
 
         juce::dsp::AudioBlock<float> upBlock(workBuffer);
         auto upSub = upBlock.getSubBlock(0, static_cast<size_t>(numSamples));
@@ -117,25 +182,17 @@ public:
         float* osL = osBlock.getChannelPointer(0);
         float* osR = osBlock.getChannelPointer(1);
 
-        bool poisoned = false;
-        for (int i = 0; i < osNum; ++i)
+        for (int i = 0; i < osNum && !shapingOff; ++i)
         {
             const float pre = driveGainSmooth.next();
             const float post = outGainSmooth.next();
             const float amount = bypass.next() * mixSmooth.next();
             const float modeMix = modeMixSmooth.next();
 
-            float inL = osL[i];
-            float inR = osR[i];
-            const bool corrupt = !std::isfinite(inL) || !std::isfinite(inR);
-            if (!std::isfinite(inL))
-                inL = 0.0f;
-            if (!std::isfinite(inR))
-                inR = 0.0f;
-            if (corrupt)
-                poisoned = true;
+            const float inL = osL[i];
+            const float inR = osR[i];
 
-            if (amount > 0.0f || corrupt)
+            if (amount > 0.0f)
             {
                 float wetL = shapeSample(0, mode, inL * pre);
                 float wetR = shapeSample(1, mode, inR * pre);
@@ -153,9 +210,6 @@ public:
                 osR[i] = inR + amount * (wetR - inR);
             }
         }
-
-        if (poisoned)
-            oversampler.reset();
 
         juce::dsp::AudioBlock<float> downFull(buffer);
         if (numChannels == 1)
@@ -248,10 +302,15 @@ private:
         exciterHP[1].setHighPass(2500.0f, 0.7071f);
     }
 
-    juce::dsp::Oversampling<float> oversampler { 2, 2, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, true };
+    // useIntegerLatency = true: the two FIR stages otherwise sum to a half-sample
+    // group delay, which no host can compensate; JUCE pads it to a whole sample.
+    juce::dsp::Oversampling<float> oversampler { 2, 2, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, true, true };
     juce::AudioBuffer<float> workBuffer;
-    size_t maxSamplesToProcess = 256;
-    size_t osMaxBlock = 0;
+    size_t osMaxBlock = 1;
+    static constexpr int kMaxLatency = 256;
+    std::array<std::array<float, kMaxLatency>, 2> dryRing {};
+    int ringPos = 0;
+    int latency = 0;
     bool wasFullyOff = false;
     Biquad tapeLP[2];
     Biquad exciterHP[2];

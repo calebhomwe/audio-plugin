@@ -21,6 +21,7 @@ public:
     {
         sr = sampleRateIn > 1.0 ? sampleRateIn : 44100.0;
         preparedBlock = juce::jmax(blockSize, 1);
+        scratch.setSize(2, preparedBlock, false, false, true);
         reset();
     }
 
@@ -37,6 +38,13 @@ public:
     {
         for (auto& v : voices) if (v.active) return true;
         return false;
+    }
+
+    int getActiveVoiceCount() const
+    {
+        int n = 0;
+        for (auto& v : voices) if (v.active) ++n;
+        return n;
     }
 
     void noteOn(int note, float velocity)
@@ -67,7 +75,7 @@ public:
             v.family = Family::Cymbal;
             v.vel = vel;
             v.active = true;
-            v.open = (n == 46 || n == 42);
+            v.open = (n == 46);   // GM: 42 closed, 44 pedal, 46 open
             v.randomOffset = white() * 0.5f * ((n % 5) == 0 ? 1.0f : 0.3f);
             v.panL = 0.92f; v.panR = 0.92f;
             const float p = ((n % 7) - 3) * 0.08f;
@@ -90,25 +98,34 @@ public:
     // Mix the drum bus into the host buffer BEFORE the FX chain.
     void renderAdd(juce::AudioBuffer<float>& b, int numChannels)
     {
+        renderAdd(b, numChannels, 0, b.getNumSamples());
+    }
+
+    // Renders [start, start+num). Allocation-free: sliced to the scratch size
+    // fixed in prepare(), so oversized host blocks never grow buffers here.
+    void renderAdd(juce::AudioBuffer<float>& b, int numChannels, int start, int num)
+    {
         if (!enabled) return;
-        const int num = b.getNumSamples();
-        if (num <= 0 || numChannels <= 0) return;
+        numChannels = juce::jmin(numChannels, b.getNumChannels());
+        if (num <= 0 || numChannels <= 0 || scratch.getNumSamples() <= 0) return;
+        const int slice = scratch.getNumSamples();
 
-        if (scratch.getNumSamples() < num)
-            scratch.setSize(juce::jmax(2, numChannels), num, false, false, true);
-
-        for (auto& v : voices)
+        for (int pos = 0; pos < num; pos += slice)
         {
-            if (!v.active) continue;
+            const int n = juce::jmin(slice, num - pos);
             float* const outL = scratch.getWritePointer(0);
             float* const outR = scratch.getWritePointer(1);
-            renderVoice(v, num, outL, outR);
-            for (int ch = 0; ch < numChannels; ++ch)
+            for (auto& v : voices)
             {
-                float* dst = b.getWritePointer(ch);
-                const float* src = (ch & 1) ? outR : outL;
-                for (int i = 0; i < num; ++i)
-                    dst[i] += src[i];
+                if (!v.active) continue;
+                renderVoice(v, n, outL, outR);
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    float* dst = b.getWritePointer(ch) + start + pos;
+                    const float* src = (ch & 1) ? outR : outL;
+                    for (int i = 0; i < n; ++i)
+                        dst[i] += src[i];
+                }
             }
         }
     }
