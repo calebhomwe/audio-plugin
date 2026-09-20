@@ -52,6 +52,7 @@ target_sources(MixAgentSmokeTest PRIVATE
     Tests/SmokeTest.cpp
     ${AGM_SOURCES})
 target_compile_features(MixAgentSmokeTest PRIVATE cxx_std_17)
+target_compile_definitions(MixAgentSmokeTest PRIVATE JUCE_MODAL_LOOPS_PERMITTED=1)   # runDispatchLoopUntil in tests
 target_link_libraries(MixAgentSmokeTest PRIVATE
     juce::juce_audio_basics
     juce::juce_audio_processors
@@ -67,6 +68,7 @@ target_sources(EditorProbe PRIVATE
     Tests/EditorProbe.cpp
     ${AGM_SOURCES})
 target_compile_features(EditorProbe PRIVATE cxx_std_17)
+target_compile_definitions(EditorProbe PRIVATE JUCE_MODAL_LOOPS_PERMITTED=1)
 target_include_directories(EditorProbe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(EditorProbe PRIVATE
     juce::juce_dsp)
@@ -86,3 +88,11 @@ if(MIXAGENT_SANITIZE AND NOT MSVC)
 endif()
 
 add_test(NAME MixAgentSmokeTest COMMAND MixAgentSmokeTest)
+
+# The editor probe needs a display; on Linux run it under xvfb-run when available.
+find_program(MIXAGENT_XVFB_RUN xvfb-run)
+if(MIXAGENT_XVFB_RUN)
+    add_test(NAME EditorProbe COMMAND ${MIXAGENT_XVFB_RUN} -a $<TARGET_FILE:EditorProbe>)
+else()
+    add_test(NAME EditorProbe COMMAND EditorProbe)
+endif()
