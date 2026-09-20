@@ -155,11 +155,24 @@ private:
     float drumDb = -16.0f;
     juce::AudioBuffer<float> scratch;
 
+    // GM-style map (reachable on MIDI channel 10 for every note; notes 35-49
+    // also on any channel). Kick family = pitch-drop sine: bass drums, toms,
+    // bongo. Snare family = tone + noise burst: snares, clap, side stick, crashes.
+    // Everything else = cymbal/hat noise.
     Family familyForNote(int n) const
     {
-        if (n == 35 || n == 36 || n == 37 || n == 41 || n == 60) return Family::Kick;
-        if (n == 38 || n == 39 || n == 40 || n == 49 || n == 57) return Family::Snare;
-        return Family::Cymbal; // hats 42/44/46, open hats, percs, everything else
+        switch (n)
+        {
+            case 35: case 36:                                   // bass drums
+            case 41: case 43: case 45: case 47: case 48: case 50: // toms
+            case 60: case 61:                                   // bongos
+                return Family::Kick;
+            case 37: case 38: case 39: case 40:                 // side stick, snares, clap
+            case 49: case 57:                                   // crash 1 / crash 2
+                return Family::Snare;
+            default:
+                return Family::Cymbal;                          // hats 42/44/46, rides, percussion
+        }
     }
 
     Voice& voiceFor(Family fam)

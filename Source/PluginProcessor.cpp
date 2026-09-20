@@ -20,6 +20,7 @@ MixAgentAudioProcessor::MixAgentAudioProcessor()
 
 MixAgentAudioProcessor::~MixAgentAudioProcessor()
 {
+    cancelPendingUpdate();
     for (auto* param : getParameters())
         if (auto* rp = dynamic_cast<juce::RangedAudioParameter*>(param))
             apvts.removeParameterListener(rp->paramID, this);
@@ -260,9 +261,11 @@ void MixAgentAudioProcessor::drainUiNotes()
     {
         for (int i = 0; i < size; ++i)
         {
+            // The pad grid is the instrument's preview keyboard (C3-B3 = 48-59):
+            // it must never hit the legacy 35-49 drum range.
             const auto& e = uiNoteSlots[(size_t)(start + i)];
-            handleMidiEvent(e.on ? juce::MidiMessage::noteOn(1, e.note, e.velocity)
-                                 : juce::MidiMessage::noteOff(1, e.note));
+            if (e.on) instruments.noteOn(e.note, e.velocity);
+            else instruments.noteOff(e.note, 0.0f);
         }
     };
     apply(start1, size1);
@@ -270,9 +273,13 @@ void MixAgentAudioProcessor::drainUiNotes()
     uiNoteFifo.finishedRead(size1 + size2);
 }
 
+// Drums: everything on MIDI channel 10 (GM convention, makes the whole GM map
+// reachable) plus, for compatibility with earlier sessions, notes 35-49 on any
+// channel. UI pads never come through here (they always play the instrument).
 void MixAgentAudioProcessor::handleMidiEvent(const juce::MidiMessage& msg)
 {
-    auto isDrumNote = [](int n) { return n >= 35 && n <= 49; };
+    const bool drumChannel = msg.getChannel() == 10;
+    auto isDrumNote = [drumChannel](int n) { return drumChannel || (n >= 35 && n <= 49); };
     if (msg.isNoteOn())
     {
         const int note = msg.getNoteNumber();
@@ -284,6 +291,18 @@ void MixAgentAudioProcessor::handleMidiEvent(const juce::MidiMessage& msg)
         const int note = msg.getNoteNumber();
         if (isDrumNote(note)) drumEngine.noteOff(note, 0.0f);
         else instruments.noteOff(note, 0.0f);
+    }
+    else if (msg.isProgramChange())
+    {
+        // Applied to the bank right here (sample-accurate); the inst_program
+        // parameter is brought in line on the message thread.
+        const int pc = msg.getProgramChangeNumber();
+        if (pc >= 0 && pc < (int)agm::InstrumentBank::kCount && !drumChannel)
+        {
+            instruments.setProgram(pc);
+            midiProgramChange.store(pc, std::memory_order_relaxed);
+            triggerAsyncUpdate();
+        }
     }
     else if (msg.isPitchWheel())
     {
@@ -487,18 +506,34 @@ bool MixAgentAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) 
     return layouts.getMainOutputChannels() == 1 || layouts.getMainOutputChannels() == 2;
 }
 
+void MixAgentAudioProcessor::handleAsyncUpdate()
+{
+    const int pc = midiProgramChange.exchange(-1, std::memory_order_relaxed);
+    if (pc < 0)
+        return;
+    if (auto* p = dynamic_cast<juce::RangedAudioParameter*>(apvts.getParameter("inst_program")))
+        p->setValueNotifyingHost(p->getNormalisableRange().convertTo0to1((float)pc));
+}
+
 void MixAgentAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
     auto state = apvts.copyState();
     if (auto xml = state.createXml())
+    {
+        xml->setAttribute("hostProgram", currentProgram);
         copyXmlToBinary(*xml, destData);
+    }
 }
 
 void MixAgentAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
 {
     if (auto xml = getXmlFromBinary(data, sizeInBytes))
         if (xml->hasTagName(apvts.state.getType()))
+        {
+            // Older states carry no hostProgram attribute: keep preset 0 as before.
+            currentProgram = juce::jlimit(0, kPresetCount - 1, xml->getIntAttribute("hostProgram", 0));
             apvts.replaceState(juce::ValueTree::fromXml(*xml));
+        }
 }
 
 namespace

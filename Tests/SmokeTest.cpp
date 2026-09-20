@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <new>
 #include <random>
+#include <ctime>
 
 using namespace juce;
 
@@ -677,6 +678,47 @@ static void instrumentSuite()
               std::string("program ") + IB::programName(p) + " envelope reaches exact zero and frees voice");
     }
 
+    // voice lifecycle: 24-voice Pad chord released, measure how long voices stay allocated and the CPU cost
+    {
+        Harness h;
+        h.disableAllModules();
+        h.proc->setInstrumentProgram((int)IB::Pad);
+        h.setRaw("inst_level", -12.0f);
+        MidiBuffer chord;
+        for (int i = 0; i < IB::kVoices; ++i)
+            chord.addEvent(MidiMessage::noteOn(1, 50 + i, 0.9f), 0);
+        h.runMidi(chord, 1.0f);
+        MidiBuffer off;
+        for (int i = 0; i < IB::kVoices; ++i)
+            off.addEvent(MidiMessage::noteOff(1, 50 + i), 0);
+        std::vector<float> out;
+        const std::clock_t c0 = std::clock();
+        double voiceSeconds = 0.0;
+        {
+            MidiBuffer offCopy(off);
+            const int total = 44100 * 20;
+            AudioBuffer<float> buf(2, 512);
+            for (int done = 0; done < total; done += 512)
+            {
+                buf.clear();
+                MidiBuffer m;
+                if (done == 0) m = offCopy;
+                h.proc->processBlock(buf, m);
+                voiceSeconds += h.proc->getInstrumentVoiceCount() * 512.0 / 44100.0;
+                for (int i = 0; i < 512; ++i) out.push_back(buf.getSample(0, i));
+            }
+        }
+        const double cpuMs = 1000.0 * (double)(std::clock() - c0) / CLOCKS_PER_SEC;
+        int lastNonZero = 0;
+        for (int i = 0; i < (int)out.size(); ++i) if (out[(size_t)i] != 0.0f) lastNonZero = i;
+        // click check at the free point: the step at the end of the tail must be tiny
+        const float endStep = maxAbsDiff(out, std::max(1, lastNonZero - 2205), lastNonZero + 2);
+        std::cout << "  24-voice Pad release: tail ends at " << lastNonZero / 44100.0 << " s, " << voiceSeconds << " voice-seconds rendered, 20 s took "
+                  << (int)cpuMs << " ms CPU, end step " << endStep << ", voices left " << h.proc->getInstrumentVoiceCount() << "\n";
+        check(h.proc->getInstrumentVoiceCount() == 0 && lastNonZero < 44100 * 6 && endStep < 1e-3f,
+              "24-voice Pad chord frees every voice within 6 s of release, no click at the free point");
+    }
+
     // velocity curve monotonic
     {
         IB bank;
@@ -872,6 +914,48 @@ static void instrumentSuite()
         check(h.proc->getInstrumentVoiceCount() == 0 && exactlyZero(out, 0, 4096), "prepareToPlay/reset: all notes off, silent");
     }
 
+    // MIDI program change: applied at its sample offset, parameter follows on the message thread
+    {
+        auto render = [](int startProgram, bool sendPc, std::vector<float>& out, MixAgentAudioProcessor** keep = nullptr)
+        {
+            auto h = std::make_unique<Harness>();
+            h->disableAllModules();
+            h->proc->setInstrumentProgram(startProgram);
+            h->runSilence(0.2f);
+            MidiBuffer mb;
+            if (sendPc) mb.addEvent(MidiMessage::programChange(1, (int)IB::Pluck), 256);
+            mb.addEvent(MidiMessage::noteOn(1, 60, 0.9f), 300);
+            h->run(512, &out, nullptr, &mb);
+            h->run(2048, &out, nullptr);
+            const int prog = h->proc->getInstrumentProgram();
+            if (keep) *keep = nullptr;
+            return prog;
+        };
+        std::vector<float> withPc, ctrlNew, ctrlOld;
+        const int progAfter = render((int)IB::Pad, true, withPc);
+        render((int)IB::Pluck, false, ctrlNew);
+        render((int)IB::Pad, false, ctrlOld);
+        float dNew = 0.0f, dOld = 0.0f;
+        for (size_t i = 0; i < withPc.size(); ++i)
+        {
+            dNew = std::max(dNew, std::abs(withPc[i] - ctrlNew[i]));
+            dOld = std::max(dOld, std::abs(withPc[i] - ctrlOld[i]));
+        }
+        std::cout << "  MIDI program change: diff vs Pluck control " << dNew << ", vs Pad control " << dOld << "\n";
+        check(progAfter == (int)IB::Pluck && dNew < 1e-6f && dOld > 1e-3f,
+              "MIDI program change at offset 256 switches the bank before the note at 300");
+        Harness h;
+        MidiBuffer pc;
+        pc.addEvent(MidiMessage::programChange(1, (int)IB::Organ), 0);
+        h.runMidi(pc);
+        MessageManager::getInstance()->runDispatchLoopUntil(100);
+        check((int)h.getRaw("inst_program") == (int)IB::Organ, "MIDI program change is reflected in the inst_program parameter");
+        MidiBuffer drumPc;
+        drumPc.addEvent(MidiMessage::programChange(10, 3), 0);
+        h.runMidi(drumPc);
+        check(h.proc->getInstrumentProgram() == (int)IB::Organ, "program change on the drum channel is ignored");
+    }
+
     // program change while a note is held: no crash, old voice keeps its recipe, new note uses the new one
     {
         Harness h;
@@ -923,10 +1007,10 @@ static void drumSuite()
         check(!h.proc->getDrumsActive() && exactlyZero(idle, 0, 2048), "kick tail ends, engine exactly silent again");
     }
     // note map: closed hat (42) is much brighter than kick (36); snare (38) between
-    auto zcr = [&](int note)
+    auto zcr = [&](int note, int channel = 1)
     {
         MidiBuffer mb;
-        mb.addEvent(MidiMessage::noteOn(1, note, 1.0f), 0);
+        mb.addEvent(MidiMessage::noteOn(channel, note, 1.0f), 0);
         std::vector<float> out;
         h.run(4410, &out, nullptr, &mb);
         h.runSilence(2.5f);
@@ -950,6 +1034,45 @@ static void drumSuite()
     const int closedLen = ringLen(42), openLen = ringLen(46);
     std::cout << "  hat lengths: closed " << closedLen << " open " << openLen << " samples\n";
     check(openLen > closedLen * 2, "open hat rings longer than closed hat");
+    // every GM note 35..61 on channel 10 renders something; 57 / 60 reachable there
+    {
+        bool all = true;
+        for (int n = 35; n <= 61; ++n)
+        {
+            MidiBuffer mb;
+            mb.addEvent(MidiMessage::noteOn(10, n, 1.0f), 0);
+            std::vector<float> out;
+            h.run(2048, &out, nullptr, &mb);
+            if (peakRange(out, 0, 2048) < 1e-3f) { all = false; std::cout << "  drum note " << n << " silent\n"; }
+            MidiBuffer off;
+            off.addEvent(MidiMessage::controllerEvent(1, 120, 0), 0);
+            h.runMidi(off, 0.2f);
+        }
+        check(all, "drum map: every note 35..61 on MIDI channel 10 renders");
+        const float crashZ = zcr(57, 10);
+        MidiBuffer mb;
+        mb.addEvent(MidiMessage::noteOn(10, 60, 1.0f), 0);
+        std::vector<float> out;
+        h.run(4410, &out, nullptr, &mb);
+        const float bongoZ = zeroCrossingFreq(out, h.proc->getLatencySamples(), 2205, 44100.0);
+        h.runSilence(2.5f);
+        std::cout << "  crash2 (57) zcr " << crashZ << ", bongo (60, ch10) zcr " << bongoZ << "\n";
+        check(crashZ > 1000.0f && bongoZ < 300.0f, "GM 57 renders as a crash, 60 (channel 10) as a drum-family hit");
+        // notes above 49 on channel 1 still belong to the instrument
+        Harness g;
+        g.disableAllModules();
+        g.setOn("inst_enabled", true);
+        MidiBuffer inst;
+        inst.addEvent(MidiMessage::noteOn(1, 57, 0.9f), 0);
+        g.runMidi(inst);
+        check(g.proc->getInstrumentVoiceCount() == 1 && !g.proc->getDrumsActive(), "note 57 on channel 1 plays the instrument, not a drum");
+        // the pad grid (UI notes 48-59) must play the instrument even for 48/49
+        g.proc->uiNoteOn(48, 0.9f);
+        g.proc->uiNoteOn(49, 0.9f);
+        g.runSilence(0.05f);
+        check(g.proc->getInstrumentVoiceCount() == 3 && !g.proc->getDrumsActive(), "UI pads 48/49 play the instrument, never the legacy drum range");
+    }
+
     // round-robin: a second kick does not cut the first; pool exhaustion recycles safely
     {
         MidiBuffer two;
@@ -1165,6 +1288,40 @@ static void fxSuite()
                   << ", 5-6 s exactly zero: " << (exactlyZero(out, 220500, 264600) ? "yes" : "no") << "\n";
         check(during > 1e-3f && after < during * 1e-3f && late < 1e-6f && exactlyZero(out, 220500, 264600),
               "reverb tail falls >60 dB after its decay time and reaches exact silence");
+        // RT60 per band (isolated reverb, decay 0.5 s, damp 0.5, size 0.7): slope of the
+        // tail envelope between 50 ms and 350 ms after a 300 ms sine burst
+        auto rt60At = [](float freq, float decay, float damp)
+        {
+            agm::Reverb r; r.prepare(44100.0, 512); r.setEnabled(true); r.setMix(1.0f); r.setDecaySec(decay);
+            r.setSize(0.7f); r.setDamping(damp); r.setPreDelayMs(0.0f); r.setWidth(1.0f);
+            const double inc = 2.0 * MathConstants<double>::pi * freq / 44100.0;
+            AudioBuffer<float> b(2, 512);
+            std::vector<float> tail;
+            for (int blk = 0; blk < 300; ++blk)   // 3.5 s
+            {
+                for (int i = 0; i < 512; ++i)
+                {
+                    const int n = blk * 512 + i;
+                    const float x = n >= 22050 && n < 22050 + 13230 ? 0.5f * (float)std::sin(inc * n) : 0.0f;
+                    b.setSample(0, i, x); b.setSample(1, i, x);
+                }
+                r.process(b);
+                for (int i = 0; i < 512; ++i) tail.push_back(b.getSample(0, i));
+            }
+            const int t0 = 22050 + 13230;
+            const float e1 = rmsRange(tail, t0 + 2205, t0 + 4410);      // 50-100 ms after the burst
+            const float e2 = rmsRange(tail, t0 + 13230, t0 + 15435);    // 300-350 ms after
+            const float slopeDbPerSec = (dbOf(e1) - dbOf(e2)) / 0.25f;
+            return slopeDbPerSec > 0.0f ? 60.0f / slopeDbPerSec : 1e9f;
+        };
+        const float rtLo = rt60At(200.0f, 0.5f, 0.5f), rtMid = rt60At(1000.0f, 0.5f, 0.5f), rtHi = rt60At(5000.0f, 0.5f, 0.5f);
+        const float rtMid0 = rt60At(1000.0f, 0.5f, 0.0f), rtHi0 = rt60At(5000.0f, 0.5f, 0.0f), rtLo2 = rt60At(200.0f, 2.0f, 0.5f);
+        std::cout << "  reverb RT60 @ decay 0.5 / damp 0.5: 200 Hz " << rtLo << " s, 1 kHz " << rtMid << " s, 5 kHz " << rtHi
+                  << " s; damp 0: 1 kHz " << rtMid0 << " s, 5 kHz " << rtHi0 << " s; decay 2.0 / damp 0.5 @200 Hz " << rtLo2 << " s\n";
+        // The Decay knob is the low-frequency RT60; damping shortens the highs (that is its job).
+        check(std::abs(rtLo - 0.5f) < 0.075f && std::abs(rtLo2 - 2.0f) < 0.3f, "reverb Decay knob = RT60 at 200 Hz within 15 %");
+        check(std::abs(rtMid0 - 0.5f) < 0.075f && std::abs(rtHi0 - 0.5f) < 0.075f, "reverb with Damp 0: RT60 flat within 15 % up to 5 kHz");
+        check(rtHi < rtMid && rtMid < rtLo, "reverb Damp 0.5 shortens the highs progressively");
         h.setRaw("rvb_decay", 10.0f); h.setRaw("rvb_size", 1.0f);
         h.runSilence(0.5f);
         std::vector<float> longTail;
@@ -1219,7 +1376,9 @@ static void fxSuite()
         }
         std::cout << "  limiter 4x true peak: overall " << dbOf(tp) << " dBTP, sine bursts " << dbOf(tpSine)
                   << " dBTP, square wave " << dbOf(tpSquare) << " dBTP (sample-peak limiter: square-wave overshoot is expected)\n";
-        check(tpSine <= ceiling * agm::dbToGain(0.3f), "limiter: 4x true-peak on sine bursts within 0.3 dB of the ceiling");
+        check(tpSine <= ceiling * agm::dbToGain(0.05f), "limiter: 4x true-peak on sine bursts within 0.05 dB of the ceiling");
+        check(tpSquare <= agm::dbToGain(-0.9f), "limiter: 4x true-peak on a hard-clipped square wave <= -0.9 dBTP (ceiling -1 dB)");
+        check(tp <= agm::dbToGain(-0.9f), "limiter: 4x true-peak of the whole burst/square/spike programme <= -0.9 dBTP");
         // steady sine at +6 dB: clean limiting (rms near ceiling/sqrt2, i.e. gain riding, not clipping)
         float rms = 0.0f, spk = 0.0f;
         h.runSine(1000.0f, 2.0f, 1.0f, 0.5f, rms, spk);
@@ -1271,6 +1430,13 @@ static void stateSuite()
         check(same && (int)values.size() == a.proc->getParameters().size(), "state round-trip: all " + std::to_string(values.size()) + " parameters exact");
         check(b.proc->isFavorite(3) && b.proc->getInstrumentProgram() == a.proc->getInstrumentProgram(),
               "state round-trip: instrument program + favourites");
+        a.proc->setCurrentProgram(7);
+        MemoryBlock blob2;
+        a.proc->getStateInformation(blob2);
+        Harness c;
+        c.proc->setStateInformation(blob2.getData(), (int)blob2.getSize());
+        check(c.proc->getCurrentProgram() == 7 && std::abs(c.getRaw("inst_level") - a.getRaw("inst_level")) < 1e-5f,
+              "state round-trip: host preset index restored without re-applying the preset");
         // the loaded processor must render sanely afterwards
         b.enableAllModulesModerate();
         MidiBuffer mb;

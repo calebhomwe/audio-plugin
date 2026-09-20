@@ -10,7 +10,9 @@
 #include "DSP/DrumEngine.h"
 #include "DSP/InstrumentBank.h"
 
-class MixAgentAudioProcessor : public juce::AudioProcessor, public juce::AudioProcessorValueTreeState::Listener
+class MixAgentAudioProcessor : public juce::AudioProcessor,
+                               public juce::AudioProcessorValueTreeState::Listener,
+                               private juce::AsyncUpdater
 {
 public:
     MixAgentAudioProcessor();
@@ -102,6 +104,8 @@ private:
     std::array<UiNoteEvent, kUiNoteFifoSize> uiNoteSlots {};
 
     void handleMidiEvent(const juce::MidiMessage& msg);
+    void handleAsyncUpdate() override;   // syncs a MIDI program change into the inst_program parameter
+    std::atomic<int> midiProgramChange { -1 };
     void renderSynthBus(juce::AudioBuffer<float>& buffer, int numCh, int start, int num);
     void drainUiNotes();
 
