@@ -20,7 +20,9 @@ that proves it, marked FIXED with an after-measurement or LEFT OPEN with a reaso
   interpolator and wobble, reverb late-field flatness and decorrelation, imager width mapping,
   every drum voice's spectrum/decay/velocity response, instrument tuning/aliasing/release/voice
   stealing.
-- 151 → 212 checks in total across four targets, all registered with CTest and wired into CI.
+- 160 → 217 checks in total across four targets, all registered with CTest and wired into CI.
+- Sanitizers: the whole suite under `-fsanitize=address,undefined` is clean — 151/151, 11/11
+  and 42/42, exit 0, no AddressSanitizer, LeakSanitizer or UndefinedBehaviorSanitizer report.
 
 ### Fixed
 
@@ -120,6 +122,15 @@ that proves it, marked FIXED with an after-measurement or LEFT OPEN with a reaso
   `dontSendNotification` now, and `EditorProbe` constructs the editor, runs the message loop
   and asserts that not one parameter moved. This was caught by the probe inside the same wave.
 - `EditorProbe`: 9 → 13 checks.
+
+- **The reported tail length was a fixed 5 s.** A host uses `getTailLengthSeconds()` to decide
+  how long to keep calling `processBlock` after the transport stops. VERIFIED with an impulse:
+  a 2 s delay at 0.95 feedback is still above −60 dB after **68 s**, and a 10 s reverb after
+  4.68 s, against a reported 5 s. The figure is now computed from the settings
+  (`1.25 × Decay + PreDelay + 0.3` for the reverb, `Time × ln(1000)/−ln(Feedback)` for the
+  delay), floored at 6 s and capped at 30 s — the cap is deliberate, because the honest figure
+  for extreme feedback runs to minutes and no host will render that. After: 6.00 / 12.81 /
+  30.00 s for the three cases above.
 
 ### Measured and deliberately NOT changed
 

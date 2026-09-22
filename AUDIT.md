@@ -444,6 +444,28 @@ M6 made a preset restore every default. Caught by `EditorProbe` within the same 
 `dontSendNotification`, and `EditorProbe` now constructs the editor, runs the message loop and
 asserts that not one parameter moved.
 
+### N13 — The reported tail length was a fixed 5 s. `Source/PluginProcessor.h:32`
+
+`getTailLengthSeconds()` returned `5.0` whatever the settings were. A host uses that to decide
+how long to keep calling `processBlock` after the transport stops, so under-reporting truncates
+the tail on bounce.
+
+Proof (`MixAgentAuditTest`, impulse in, time until the output falls 60 dB below the tail's own
+peak, floored at −120 dBFS):
+
+```
+  defaults                         measured   0.00 s, reported   5.00 s
+  reverb decay 10 s, mix 1         measured   4.68 s, reported   5.00 s
+  delay 2 s, feedback 0.95, mix 1  measured  68.00 s, reported   5.00 s
+```
+
+**FIXED.** The report is now computed from the settings: `1.25 × Decay + PreDelay + 0.3` for the
+reverb, `Time × ln(1000)/−ln(Feedback)` for the delay, floored at 6 s (which covers a released
+instrument chord with no FX engaged) and **capped at 30 s**. The cap is deliberate and
+documented: 2 s at 0.95 feedback is ~270 s of −60 dB decay in theory and 68 s measured with the
+damping filter in the loop, and no host will render minutes of silence — the delay does reach
+exact zero, its denormal guard sees to that. After: `6.00 / 12.81 / 30.00 s`.
+
 ---
 
 ## COSMETIC
@@ -576,6 +598,11 @@ still name targets that exist (`MixAgent_VST3`, `MixAgent_Standalone`, `EditorPr
 | N10 | MINOR | `in_gain`, `out_gain`, `drum_level` have no control on the editor | FIXED — 42 → 45 knobs |
 | N11 | MINOR | Ten knobs could only print "0" or "1"; no units | FIXED — percentages, Hz, % |
 | N12 | MAJOR | Opening the editor reset every parameter | FIXED — caught by EditorProbe |
+| N13 | MINOR | `getTailLengthSeconds()` fixed at 5 s vs a 68 s measured tail | FIXED — computed from the settings, capped at 30 s |
 
 Test counts: 151 → 151 (`MixAgentSmokeTest`), 0 → 10 (`MixAgentAuditTest`),
-0 → 42 (`MixAgentCharacterTest`), 9 → 13 (`EditorProbe`). **160 → 216 checks** in total.
+0 → 42 (`MixAgentCharacterTest`), 9 → 13 (`EditorProbe`). **160 → 217 checks** in total.
+
+Sanitizers: the whole suite under `-fsanitize=address,undefined` —
+`MixAgentSmokeTest` 151/151, `MixAgentAuditTest` 11/11, `MixAgentCharacterTest` 42/42, all
+exit 0 with no AddressSanitizer, LeakSanitizer or UndefinedBehaviorSanitizer report.

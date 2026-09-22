@@ -151,19 +151,19 @@ void MixAgentAudioProcessor::handleParameter(const juce::String& id, float rawVa
     else if (id == "img_width") { imager.setWidthPercent(rawValue); }
     else if (id == "img_balance") { imager.setBalance(rawValue); }
     else if (id == "img_mono") { imager.setMono(rawValue > 0.5f); }
-    else if (id == "dly_enabled") { delay.setEnabled(rawValue > 0.5f); }
-    else if (id == "dly_time") { delay.setTimeMs(rawValue); }
-    else if (id == "dly_feedback") { delay.setFeedback(rawValue); }
+    else if (id == "dly_enabled") { delay.setEnabled(rawValue > 0.5f); dlyOn.store(rawValue > 0.5f); }
+    else if (id == "dly_time") { delay.setTimeMs(rawValue); dlyTimeMs.store(rawValue); }
+    else if (id == "dly_feedback") { delay.setFeedback(rawValue); dlyFeedback.store(rawValue); }
     else if (id == "dly_mix") { delay.setMix(rawValue); }
     else if (id == "dly_damp") { delay.setDamping(rawValue); }
     else if (id == "dly_width") { delay.setWidth(rawValue); }
-    else if (id == "rvb_enabled") { reverb.setEnabled(rawValue > 0.5f); }
+    else if (id == "rvb_enabled") { reverb.setEnabled(rawValue > 0.5f); rvbOn.store(rawValue > 0.5f); }
     else if (id == "rvb_size") { reverb.setSize(rawValue); }
-    else if (id == "rvb_decay") { reverb.setDecaySec(rawValue); }
+    else if (id == "rvb_decay") { reverb.setDecaySec(rawValue); rvbDecaySec.store(rawValue); }
     else if (id == "rvb_damp") { reverb.setDamping(rawValue); }
     else if (id == "rvb_width") { reverb.setWidth(rawValue); }
     else if (id == "rvb_mix") { reverb.setMix(rawValue); }
-    else if (id == "rvb_predelay") { reverb.setPreDelayMs(rawValue); }
+    else if (id == "rvb_predelay") { reverb.setPreDelayMs(rawValue); rvbPreDelayMs.store(rawValue); }
     else if (id == "lim_enabled") { limiter.setEnabled(rawValue > 0.5f); }
     else if (id == "lim_ceiling") { limiter.setCeilingDb(rawValue); }
     else if (id == "lim_attack") { limiter.setAttackMs(rawValue); }
@@ -227,6 +227,36 @@ void MixAgentAudioProcessor::prepareToPlay(double sr, int maxBlockSize)
 }
 
 void MixAgentAudioProcessor::releaseResources() {}
+
+// A host uses this to decide how long to keep calling processBlock after the
+// transport stops. A fixed 5 s under-reported badly: measured with an impulse,
+// the tail of a 2 s delay at 0.95 feedback is still above -60 dB after 68 s.
+double MixAgentAudioProcessor::getTailLengthSeconds() const
+{
+    // Reverb: Decay is the low-frequency RT60 within 15 % (measured), plus the
+    // pre-delay, plus margin for the 4 diffusers.
+    double tail = 1.0;
+    if (rvbOn.load())
+        tail = std::max(tail, 1.25 * (double)rvbDecaySec.load()
+                              + 0.001 * (double)rvbPreDelayMs.load() + 0.3);
+
+    // Delay: n repeats to reach -60 dB is ln(1000) / -ln(feedback).
+    if (dlyOn.load())
+    {
+        const double g = juce::jlimit(0.0, 0.999, (double)dlyFeedback.load());
+        const double t = 0.001 * (double)dlyTimeMs.load();
+        const double repeats = g > 1.0e-3 ? 6.908 / -std::log(g) : 1.0;
+        // Cap at kMaxReportedTail: at high feedback the honest figure runs to
+        // minutes (2 s at 0.95 is ~270 s of -60 dB decay in theory, 68 s
+        // measured with the damping filter in the loop), and no host will render
+        // that. The delay does reach exact zero - its denormal guard sees to it.
+        tail = std::max(tail, std::min(t * repeats + t, kMaxReportedTail));
+    }
+
+    // The drum voices fade out by 3.5 s at the latest and the instrument voices
+    // by 6 s, so the floor covers a released chord even with no FX engaged.
+    return std::max(tail, 6.0);
+}
 
 void MixAgentAudioProcessor::uiNoteOn(int note, float velocity)
 {

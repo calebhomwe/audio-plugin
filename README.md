@@ -92,7 +92,7 @@ xvfb-run ./build/EditorProbe_artefacts/Release/EditorProbe             # editor 
 | Target | What it covers |
 |---|---|
 | `MixAgentSmokeTest` | latency vs `getLatencySamples()`, real-time safety, NaN/Inf and 44.1–192 kHz × blocks 1–4096, instruments, drums, every FX module, state round-trip, all 12 presets |
-| `MixAgentAuditTest` | every control moved from min to max against a fixed stereo+MIDI probe; `operator new` armed only across `processBlock`; 1000× state round-trip; garbage/truncated/future state; a per-parameter click hunt; host-preset integrity across all 132 ordered preset pairs |
+| `MixAgentAuditTest` | every control moved from min to max against a fixed stereo+MIDI probe; `operator new` armed only across `processBlock`; 1000× state round-trip; garbage/truncated/future state; a per-parameter click hunt; host-preset integrity across all 132 ordered preset pairs; the reported tail length against the measured one |
 | `MixAgentCharacterTest` | module-level measurement: compressor transfer curve/ratio/knee/attack/make-up, limiter latency and 8×-measured true peak, saturation unity gain/harmonic series/aliasing, biquad response against its analytic transfer function, delay interpolator and wobble, reverb late-field flatness and decorrelation, imager width mapping, every drum voice's spectrum/decay/velocity response, instrument tuning/aliasing/release/voice stealing |
 | `EditorProbe` | constructs the editor, drives `resized()`, the program ComboBox, all 45 knobs and all 12 toggles; asserts every continuous parameter has a control, every knob's readout changes across its range, double-click returns each knob to its parameter's default, and that simply opening the editor and running the message loop changes no parameter |
 

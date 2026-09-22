@@ -29,7 +29,7 @@ public:
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 5.0; }
+    double getTailLengthSeconds() const override;
 
     int getNumPrograms() override { return kPresetCount; }
     int getCurrentProgram() override { return currentProgram; }
@@ -87,10 +87,16 @@ private:
     agm::InstrumentBank instruments;
 
     float inGainDb = 0.0f, outGainDb = 0.0f;
+    // Cached for getTailLengthSeconds(), which the host may call from either
+    // thread; written only by handleParameter().
+    std::atomic<float> rvbDecaySec { 2.5f }, rvbPreDelayMs { 10.0f };
+    std::atomic<float> dlyTimeMs { 380.0f }, dlyFeedback { 0.45f };
+    std::atomic<bool> rvbOn { false }, dlyOn { false };
     float inGainSmoothed = 1.0f, outGainSmoothed = 1.0f;
     double sampleRate = 44100.0;
     int currentProgram = 0;
     static constexpr int kPresetCount = 12;
+    static constexpr double kMaxReportedTail = 30.0;
 
     std::atomic<float> inLevelL { 0.0f }, inLevelR { 0.0f };
     std::atomic<float> outLevelL { 0.0f }, outLevelR { 0.0f };

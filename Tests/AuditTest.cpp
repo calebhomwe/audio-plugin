@@ -541,6 +541,64 @@ static void presetSuite()
 }
 
 // ---------------------------------------------------------------------------
+// 5. Does the processor tell the host the truth about its own tail? A host uses
+//    getTailLengthSeconds() to decide how long to keep calling processBlock
+//    after the transport stops; under-reporting it cuts the reverb off.
+// ---------------------------------------------------------------------------
+static double measureTail(Harness& h, double maxSecs)
+{
+    // impulse in, then silence; find the last sample above -60 dB of the peak
+    std::vector<float> out;
+    const int n = (int)(h.sr * maxSecs);
+    h.run(n, &out, nullptr, nullptr, [](int i) { return i == 0 ? 0.5f : 0.0f; });
+    // Reference the TAIL's own peak, not the direct impulse: the reverb feeds its
+    // tank at 0.015, so measuring against the dry impulse would call a perfectly
+    // audible tail "60 dB down" before it had even started.
+    const int after = (int)(h.sr * 0.02);
+    const double pk = peakRange(out, after, (int)out.size());
+    if (pk <= 0.0) return 0.0;
+    // -60 dB below the tail's own peak, but never below -120 dBFS absolute:
+    // with no FX engaged the "tail" is float rounding noise, and chasing that
+    // down would report the whole render window as tail.
+    const double floorLevel = std::max(pk * 0.001, 1.0e-6);
+    int last = 0;
+    for (int i = after; i < (int)out.size(); ++i)
+        if (std::abs((double)out[(size_t)i]) > floorLevel) last = i;
+    return last / h.sr;
+}
+
+static void tailSuite()
+{
+    std::cout << "\n=== REPORTED TAIL LENGTH ===\n";
+    bool ok = true;
+    struct Case { const char* what; std::function<void(Harness&)> setup; double maxSecs; };
+    const std::vector<Case> cases = {
+        { "defaults", [](Harness&) {}, 8.0 },
+        { "reverb decay 10 s, mix 1", [](Harness& h)
+          { h.setOn("rvb_enabled", true); h.setRaw("rvb_decay", 10.0f); h.setRaw("rvb_mix", 1.0f);
+            h.setRaw("rvb_size", 1.0f); }, 30.0 },
+        { "delay 2 s, feedback 0.95, mix 1", [](Harness& h)
+          { h.setOn("dly_enabled", true); h.setRaw("dly_time", 2000.0f);
+            h.setRaw("dly_feedback", 0.95f); h.setRaw("dly_mix", 1.0f); h.setRaw("dly_damp", 0.0f); }, 70.0 },
+    };
+    for (const auto& c : cases)
+    {
+        Harness h(48000.0, 512);
+        h.setOn("lim_enabled", false);
+        c.setup(h);
+        const double measured = measureTail(h, c.maxSecs);
+        const double reported = h.proc->getTailLengthSeconds();
+        std::cout << "  " << std::left << std::setw(32) << c.what << std::right
+                  << " measured " << std::fixed << std::setprecision(2) << std::setw(6) << measured
+                  << " s, reported " << std::setw(6) << reported << " s\n";
+        // 30 s is the deliberate cap on what is reported for extreme delay
+        // feedback (see kMaxReportedTail); anything below it must be covered.
+        if (measured > reported + 0.25 && reported < 29.9) ok = false;
+    }
+    check(ok, "getTailLengthSeconds() is at least as long as the -60 dB tail the settings produce");
+}
+
+// ---------------------------------------------------------------------------
 int main()
 {
     ScopedJuceInitialiser_GUI init;
@@ -549,6 +607,7 @@ int main()
     allocationSuite();
     tortureSuite();
     presetSuite();
+    tailSuite();
     const auto ms = Time::getMillisecondCounterHiRes() - t0;
     std::cout << (gFailures == 0 ? "AUDIT TESTS PASSED" : "AUDIT TESTS FAILED") << " ("
               << gChecks - gFailures << "/" << gChecks << " checks, " << (int)ms << " ms)\n";
