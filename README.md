@@ -94,7 +94,7 @@ xvfb-run ./build/EditorProbe_artefacts/Release/EditorProbe             # editor 
 | `MixAgentSmokeTest` | latency vs `getLatencySamples()`, real-time safety, NaN/Inf and 44.1–192 kHz × blocks 1–4096, instruments, drums, every FX module, state round-trip, all 12 presets |
 | `MixAgentAuditTest` | every control moved from min to max against a fixed stereo+MIDI probe; `operator new` armed only across `processBlock`; 1000× state round-trip; garbage/truncated/future state; a per-parameter click hunt; host-preset integrity across all 132 ordered preset pairs |
 | `MixAgentCharacterTest` | module-level measurement: compressor transfer curve/ratio/knee/attack/make-up, limiter latency and 8×-measured true peak, saturation unity gain/harmonic series/aliasing, biquad response against its analytic transfer function, delay interpolator and wobble, reverb late-field flatness and decorrelation, imager width mapping, every drum voice's spectrum/decay/velocity response, instrument tuning/aliasing/release/voice stealing |
-| `EditorProbe` | constructs the editor, drives `resized()`, the program ComboBox, every knob and every toggle, and checks each one reaches its parameter |
+| `EditorProbe` | constructs the editor, drives `resized()`, the program ComboBox, all 45 knobs and all 12 toggles; asserts every continuous parameter has a control, every knob's readout changes across its range, double-click returns each knob to its parameter's default, and that simply opening the editor and running the message loop changes no parameter |
 
 Run the suites after any DSP change. `AUDIT.md` records what has been measured, what is still
 open and what could not be verified headless. `CHANGELOG.md` records what changed and when.
@@ -106,7 +106,7 @@ ubuntu-24.04 with a cached JUCE clone.
 
 ## Controls
 
-**Top / global** — `Input` and `Output` trim, ±24 dB.
+**Top / global** — `IN` and `OUT` trim, ±24 dB, beside the input and output meters.
 
 **EQ** (7 bands, all in series; a shelf or peak band at 0 dB gain is an exact bypass)
 
@@ -149,8 +149,12 @@ stays *under* the ceiling on inter-sample-peak material.
 
 **Instruments and drums** — the saw oscillators are band-limited (PolyBLEP), so fold-down
 aliasing at C7 stays below −75 dBc. `Inst On`, `Instrument` (the 16 programs), `Inst Level` −40…+6 dB,
-`Drum Level` −40…+6 dB. The 12 pads under the FX panels are a C3–B3 preview keyboard and always
+`DRUMS` −40…+6 dB. The 12 pads under the FX panels are a C3–B3 preview keyboard and always
 play the instrument, never the drums.
+
+Readouts carry units: frequencies in Hz, times in ms, levels in dB, and the 0…1 controls
+(Drive, Mix, Feedback, Damp, Width, Size) as a percentage. Double-clicking a knob returns it to
+its parameter's default.
 
 ---
 
@@ -199,24 +203,23 @@ Ranked; the measurements behind them are in `AUDIT.md`.
    B0–C#2 from an ordinary keyboard track. Channel 10 already reaches the whole GM map; the
    unconditional window is a compatibility shim. Changing it would alter how existing sessions
    sound, so it is left as-is and documented. (`PluginProcessor.cpp:282`)
-3. **Host presets are additive.** A preset only writes the parameters it mentions, so browsing
-   presets layers them; "Init" resets nothing at all. 118 of the 132 ordered preset pairs land
-   somewhere other than a fresh load of the same preset. (`PluginProcessor.cpp:614+`)
-4. **Reverb pre-delay is applied after the tank**, so it moves the whole wet signal rather than
+3. **Reverb pre-delay is applied after the tank**, so it moves the whole wet signal rather than
    only the onset. (`Reverb.h`)
-5. **No user WAV loading.** A "bring your own one-shots" slot (decode on the message thread into
+4. **No user WAV loading.** A "bring your own one-shots" slot (decode on the message thread into
    RAM, then play from a voice) is designed but not built.
-6. **`-Wold-style-cast` is not adopted.** 1002 numeric C-style casts are the codebase's style;
+5. **`-Wold-style-cast` is not adopted.** 1002 numeric C-style casts are the codebase's style;
    `-Wall -Wextra -Wshadow -Wnon-virtual-dtor -Woverloaded-virtual -Wunused` is clean.
-7. **Reverb late-field tilt.** The tank is flat to within 3.22 dB from 125 Hz to 8 kHz with
+6. **Reverb late-field tilt.** The tank is flat to within 3.22 dB from 125 Hz to 8 kHz with
    damping off. The four diffusers are not unity-gain allpasses, which looks like the cause —
    but rebuilding them as proper allpasses measured *worse* (spread 3.22 → 3.97 dB, L/R
    correlation 0.163 → 0.289). The tilt is the comb bank's sparse low-frequency modal density;
    flattening it needs an FDN, not a coefficient.
-8. **Compressor Attack is approximate, by design.** The detector takes
+7. **Compressor Attack is approximate, by design.** The detector takes
    `max(peak, 1.414·√RMS)` with an 8 ms RMS window, which is what makes the gain reduction
    nearly independent of crest factor — and which stretches the knob: 1/10/50 ms measure
    2.83/20.33/94.83 ms to 63 % of the final reduction. Making it exact means dropping the RMS
    branch and changing how the compressor responds to everything.
+8. **Reverb parameter smoothing follows the host's block size** (`paramCoef` is derived from the
+   block size promised in `prepare`, and `updateCoefficients()` runs once per `process()` call).
 9. **Nothing has been verified in a real host.** No DAW, no `pluginval` and no audio device were
    available; `EditorProbe` proves the editor's wiring, not its appearance.

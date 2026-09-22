@@ -72,6 +72,28 @@ int main()
         auto& apvts = proc.getAPVTS();
         auto pump = [] { juce::MessageManager::getInstance()->runDispatchLoopUntil(60); };
 
+        // Opening the editor must not touch a single parameter. ComboBox
+        // selections notify asynchronously by default, so a combo the editor
+        // initialises for itself can drive the processor a few milliseconds after
+        // the window appears - which is how the preset ComboBox came to call
+        // setCurrentProgram(0) and reset everything the moment the UI opened.
+        {
+            std::vector<juce::RangedAudioParameter*> ps;
+            for (auto* p : proc.getParameters())
+                if (auto* rp = dynamic_cast<juce::RangedAudioParameter*>(p)) ps.push_back(rp);
+            std::vector<float> before;
+            for (auto* rp : ps) before.push_back(rp->getValue());
+            pump(); pump(); pump();
+            int moved = 0;
+            for (size_t i = 0; i < ps.size(); ++i)
+                if (std::abs(ps[i]->getValue() - before[i]) > 1e-6f)
+                {
+                    std::cout << "    " << ps[i]->paramID << " moved on its own\n";
+                    ++moved;
+                }
+            check(moved == 0, "opening the editor and letting the message loop run changes no parameter");
+        }
+
         // ---- program ComboBox -> inst_program
         std::vector<juce::ComboBox*> combos;
         collect<juce::ComboBox>(*edPtr, combos);
@@ -105,6 +127,8 @@ int main()
         for (auto* p : proc.getParameters())
             if (auto* rp = dynamic_cast<juce::RangedAudioParameter*>(p)) params.push_back(rp);
         int mapped = 0, broken = 0;
+        std::vector<juce::RangedAudioParameter*> owner(sliders.size(), nullptr);
+        size_t sliderIdx = 0;
         for (auto* s : sliders)
         {
             // park at the minimum first: several parameters (mix, width) default to their maximum
@@ -120,13 +144,82 @@ int main()
                 {
                     ++changed;
                     atMax = std::abs(params[i]->getValue() - 1.0f) < 1e-4f;
+                    owner[sliderIdx] = params[i];
                 }
             if (changed == 1 && atMax) ++mapped;
-            else if (changed != 0) ++broken;
+            else if (changed != 0) { broken++; owner[sliderIdx] = nullptr; }
+            ++sliderIdx;
         }
         std::cout << "  sliders: " << sliders.size() << ", mapped 1:1 to a parameter: " << mapped << ", ambiguous: " << broken << "\n";
         check(mapped >= 1 && broken == 0, "every knob that moves a parameter moves exactly that one parameter to its maximum");
         check(mapped == (int)sliders.size(), "every knob on the editor is attached to a parameter");
+
+        // Double-click-to-default must land on the parameter's real default, not
+        // on its normalised one. Match each slider to its parameter by range.
+        {
+            int wrong = 0, checkedKnobs = 0;
+            for (size_t i = 0; i < sliders.size(); ++i)
+            {
+                auto* rp = owner[i];
+                if (rp == nullptr) continue;
+                const auto& r = rp->getNormalisableRange();
+                const double want = (double)r.convertFrom0to1(rp->getDefaultValue());
+                if (std::abs(sliders[i]->getDoubleClickReturnValue() - want) > 1e-4 * std::max(1.0, std::abs(want)))
+                {
+                    if (wrong < 6)
+                        std::cout << "    " << rp->paramID << ": double-click goes to "
+                                  << sliders[i]->getDoubleClickReturnValue() << ", default is " << want << "\n";
+                    ++wrong;
+                }
+                ++checkedKnobs;
+            }
+            std::cout << "  knobs whose double-click-to-default is wrong: " << wrong
+                      << " of " << checkedKnobs << "\n";
+            check(wrong == 0, "double-clicking a knob returns it to its parameter's real default");
+        }
+
+        // Every automatable float parameter should be reachable from the editor.
+        {
+            int missing = 0;
+            for (auto* rp : params)
+            {
+                if (dynamic_cast<juce::AudioParameterBool*>(rp) != nullptr
+                    || dynamic_cast<juce::AudioParameterChoice*>(rp) != nullptr)
+                    continue;
+                bool found = false;
+                for (auto* o : owner) if (o == rp) { found = true; break; }
+                if (!found) { std::cout << "    no control for " << rp->paramID << "\n"; ++missing; }
+            }
+            check(missing == 0, "every continuous parameter has a control on the editor");
+        }
+
+        // Readouts must actually say something. Ten controls with a 0..1 range
+        // were drawn with zero decimal places, so they could only ever print "0"
+        // or "1"; the frequency knobs printed a bare number with no unit.
+        {
+            std::vector<agm::ui::Knob*> knobs;
+            collect<agm::ui::Knob>(*edPtr, knobs);
+            int flat = 0;
+            for (auto* k : knobs)
+            {
+                const double lo = k->getMinimum(), hi = k->getMaximum();
+                juce::String seen[3];
+                for (int i = 0; i < 3; ++i)
+                {
+                    k->setValue(lo + (hi - lo) * (0.25 + 0.25 * i), juce::sendNotificationSync);
+                    seen[i] = k->readout();
+                }
+                if (seen[0] == seen[1] || seen[1] == seen[2])
+                {
+                    std::cout << "    readout does not change: \"" << seen[0] << "\" / \""
+                              << seen[1] << "\" / \"" << seen[2] << "\"\n";
+                    ++flat;
+                }
+            }
+            std::cout << "  knobs: " << knobs.size() << ", readouts that do not change across the range: "
+                      << flat << "\n";
+            check(flat == 0, "every knob's readout changes at 25/50/75 % of its range");
+        }
 
         // ---- toggles -> bool parameters
         std::vector<juce::ToggleButton*> toggles;

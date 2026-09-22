@@ -9,8 +9,13 @@ namespace ui {
 class Knob : public juce::Slider
 {
 public:
-    Knob(const juce::String& label, const juce::String& suffix = {})
-        : label_(label), suffix_(suffix)
+    // `scale` and `decimals` control the READOUT only, never the value: a 0..1
+    // parameter reads as 0..100 % with scale 100, and a frequency reads in whole
+    // hertz. Without this, ten 0..1 controls were drawn with zero decimals and
+    // could only ever show "0" or "1".
+    Knob(const juce::String& label, const juce::String& suffix = {},
+         float scale = 1.0f, int decimals = 1)
+        : label_(label), suffix_(suffix), scale_(scale), decimals_(decimals)
     {
         setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
         setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
@@ -116,8 +121,12 @@ public:
                    textArea.removeFromTop(textArea.getHeight() * 0.45f),
                    juce::FontOptions(8.5f));
         g.setColour(kText);
-        drawFitted(g, getTextFromValue(getValue()) + suffix_, textArea,
-                   juce::FontOptions(10.5f, juce::Font::bold));
+        drawFitted(g, readout(), textArea, juce::FontOptions(10.5f, juce::Font::bold));
+    }
+
+    juce::String readout() const
+    {
+        return juce::String(getValue() * (double)scale_, decimals_) + suffix_;
     }
 
 private:
@@ -140,6 +149,8 @@ private:
 
     juce::String label_;
     juce::String suffix_;
+    float scale_ = 1.0f;
+    int decimals_ = 1;
 };
 
 } // namespace ui

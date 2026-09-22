@@ -55,7 +55,8 @@ jobs:
                     | sed 's|^/usr/bin/c++ ||; s| -o .*||; s| -MD .*||; s|-I\([^ ]*\)|-isystem \1|g')
           STRICT="-Wall -Wextra -Wshadow -Wnon-virtual-dtor -Woverloaded-virtual -Wunused -Werror"
           for f in Source/PluginProcessor.cpp Source/PluginEditor.cpp \
-                   Tests/SmokeTest.cpp Tests/AuditTest.cpp Tests/CharacterTest.cpp; do
+                   Tests/SmokeTest.cpp Tests/AuditTest.cpp Tests/CharacterTest.cpp \
+                   Tests/EditorProbe.cpp; do
             echo "== $f"
             /usr/bin/c++ $FLAGS $STRICT -I"$PWD" -fsyntax-only "$f"
           done
