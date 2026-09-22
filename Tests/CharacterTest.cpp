@@ -416,18 +416,35 @@ static void saturationSuite()
         // clipping (drive 1.0) the odd harmonics take over, which is also what an
         // overdriven triode does, so that point is measured but not asserted.
         bool tubeSecond = true;
-        for (float d : { 0.15f, 0.25f, 0.5f })
+        struct TubePoint { float drive; float inDb; bool assertIt; };
+        for (TubePoint tp : { TubePoint{ 0.15f, -6.0f, true }, TubePoint{ 0.25f, -6.0f, true },
+                              TubePoint{ 0.50f, -18.0f, true }, TubePoint{ 0.50f, -6.0f, false },
+                              TubePoint{ 1.00f, -6.0f, false } })
         {
-            auto out = render(0, d, 1000.0, -6.0f, (int)(sr * 0.6));
+            auto out = render(0, tp.drive, 1000.0, tp.inDb, (int)(sr * 0.6));
             const int from = (int)(sr * 0.3), n = (int)(sr * 0.25);
             const double h1 = magAt(out, from, n, 1000.0, sr);
             const double h2 = dB(magAt(out, from, n, 2000.0, sr) / std::max(h1, 1e-12));
             const double h3 = dB(magAt(out, from, n, 3000.0, sr) / std::max(h1, 1e-12));
-            std::cout << "  Tube drive " << std::setprecision(2) << d << ": H2 " << std::setprecision(1)
-                      << h2 << " dBc, H3 " << h3 << " dBc (2nd leads by " << (h2 - h3) << " dB)\n";
-            if (h2 <= h3) tubeSecond = false;
+            std::cout << "  Tube drive " << std::setprecision(2) << tp.drive << " @ "
+                      << std::setprecision(0) << tp.inDb << " dBFS: H2 " << std::setprecision(1)
+                      << h2 << " dBc, H3 " << h3 << " dBc (2nd leads by " << (h2 - h3) << " dB)"
+                      << (tp.assertIt ? "" : "   [measured, not asserted: the stage is in hard clipping here]")
+                      << "\n";
+            if (tp.assertIt && h2 - h3 < 5.0) tubeSecond = false;
         }
-        check(tubeSecond, "saturation: Tube is 2nd-harmonic dominant at drive 0.15, 0.25 and 0.5");
+        check(tubeSecond, "saturation: Tube leads with the 2nd harmonic by at least 5 dB wherever it is "
+                          "not slammed into hard clipping");
+
+        {
+            // Bounded output: an asymmetric stage swings asymmetrically, so check
+            // that once the DC servo has settled the shaper is not running away.
+            auto out = render(0, 1.0f, 200.0, -3.0f, (int)(sr * 1.0));
+            const double settled = peakOf(out, (int)(sr * 0.5), (int)(sr * 1.0));
+            std::cout << "  Tube at drive 1.0 on a -3 dBFS 200 Hz sine: settled peak "
+                      << std::setprecision(3) << settled << "\n";
+            check(settled < 1.2, "saturation: Tube stays bounded below 1.2 once the DC servo has settled");
+        }
     }
 
     {

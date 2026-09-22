@@ -301,10 +301,18 @@ private:
                 // The bias deepens with drive so the asymmetry survives hard
                 // clipping; the DC offset it introduces is removed by the servo
                 // in processChunk.
+                // The bias makes the curve compress the positive swing earlier
+                // than the negative one, which is what gives a single-ended stage
+                // its 2nd harmonic. The unity-gain normalisation 1/(1 - tanh^2 b)
+                // goes on the INPUT, not the output: on the output it would scale
+                // the asymmetric excursion too and push the negative half past
+                // -2.2 at full drive, while here the swing stays inside
+                // [-(1 + tanh b), 1 - tanh b] - at most 1.55 - and the DC servo
+                // downstream (the coupling capacitor's job) centres it on zero.
                 const float b = 0.30f + 0.40f * drive;
                 const float tb = std::tanh(b);
-                const float norm = 1.0f / (1.0f - tb * tb);
-                return (std::tanh(x + b) - tb) * norm;
+                const float k = 1.0f / (1.0f - tb * tb);
+                return std::tanh(k * x + b) - tb;
             }
         }
     }
