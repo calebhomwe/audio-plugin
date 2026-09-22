@@ -126,7 +126,7 @@ public:
                 dryRing[1][(size_t)rp] = buffer.getReadPointer(numChannels > 1 ? 1 : 0)[base + i];
                 ringPos = (rp + 1 < latency) ? rp + 1 : 0;
             }
-            processChunk(buffer, numChannels, base, n, false);
+            processChunk(buffer, numChannels, base, n);
         }
     }
 
@@ -151,7 +151,7 @@ public:
         }
     }
 
-    void processChunk(juce::AudioBuffer<float>& buffer, int numChannels, int base, int numSamples, bool shapingOff)
+    void processChunk(juce::AudioBuffer<float>& buffer, int numChannels, int base, int numSamples)
     {
         jassert(numSamples <= workBuffer.getNumSamples());
         const float* srcL = buffer.getReadPointer(0) + base;
@@ -182,7 +182,7 @@ public:
         float* osL = osBlock.getChannelPointer(0);
         float* osR = osBlock.getChannelPointer(1);
 
-        for (int i = 0; i < osNum && !shapingOff; ++i)
+        for (int i = 0; i < osNum; ++i)
         {
             const float pre = driveGainSmooth.next();
             const float post = outGainSmooth.next();

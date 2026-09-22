@@ -36,10 +36,26 @@ jobs:
             -DMIXAGENT_COPY_PLUGIN=OFF -DCMAKE_CXX_FLAGS="-Wall -Wextra"
 
       - name: Build tests + VST3
-        run: cmake --build build --target MixAgentSmokeTest EditorProbe MixAgent_VST3
+        run: |
+          cmake --build build --target MixAgentSmokeTest MixAgentAuditTest \
+            MixAgentCharacterTest EditorProbe MixAgent_VST3
 
-      - name: Smoke test (ctest)
+      - name: Tests (ctest)
         run: ctest --test-dir build --output-on-failure
 
       - name: Editor probe (xvfb)
         run: xvfb-run -a ./build/EditorProbe_artefacts/Release/EditorProbe
+
+      # The stricter set is applied to the project's OWN sources only: JUCE's
+      # headers come in through -isystem so the build is not judged on them, and
+      # nothing is compiled twice - this is a syntax-only pass.
+      - name: Strict warnings on our own sources
+        run: |
+          FLAGS=$(ninja -C build -t commands MixAgentSmokeTest | grep -m1 'PluginProcessor.cpp.o' \
+                    | sed 's|^/usr/bin/c++ ||; s| -o .*||; s| -MD .*||; s|-I\([^ ]*\)|-isystem \1|g')
+          STRICT="-Wall -Wextra -Wshadow -Wnon-virtual-dtor -Woverloaded-virtual -Wunused -Werror"
+          for f in Source/PluginProcessor.cpp Source/PluginEditor.cpp \
+                   Tests/SmokeTest.cpp Tests/AuditTest.cpp Tests/CharacterTest.cpp; do
+            echo "== $f"
+            /usr/bin/c++ $FLAGS $STRICT -I"$PWD" -fsyntax-only "$f"
+          done

@@ -1,5 +1,172 @@
 # Changelog
 
+## 2026-09-22 (wave 3) — merciless audit, hygiene pass, authenticity
+
+`AUDIT.md` is the full record: every finding with a `file:line`, a mechanism and the command
+that proves it, marked FIXED with an after-measurement or LEFT OPEN with a reason.
+
+### New audit instruments (permanent tests)
+
+- `MixAgentAuditTest` — a dead-parameter sweep over all 58 controls (every module engaged, a
+  stereo probe carrying audio and MIDI; all 58 move the output by more than −80 dB RMS), an
+  `operator new` counter armed only across `processBlock` (**0 allocations** across 4 sample
+  rates × 6 block sizes plus oversized and mono buffers, while every parameter is swept and
+  MIDI is delivered), a 1000× state round-trip, garbage/truncated/future-version state, a
+  per-parameter click hunt, and host-preset integrity across all 132 ordered preset pairs.
+- `MixAgentCharacterTest` — module-level measurement of every processor against the topology it
+  is named after: compressor transfer curve/ratio/knee/attack/make-up/detector, limiter latency
+  and 8×-measured true peak with an *independent* interpolator, saturation unity gain, harmonic
+  series and aliasing, biquad response against its analytic transfer function, delay
+  interpolator and wobble, reverb late-field flatness and decorrelation, imager width mapping,
+  every drum voice's spectrum/decay/velocity response, instrument tuning/aliasing/release/voice
+  stealing.
+- 151 → 212 checks in total across four targets, all registered with CTest and wired into CI.
+
+### Fixed
+
+- **Compressor make-up gain was unreachable** (`Source/DSP/Compressor.h`). Make-up and gain
+  reduction shared one value that was then clamped to ≤ 1.0 so the gain computer could not
+  boost — and that clamp threw the make-up away with it. VERIFIED with the signal 20 dB below
+  threshold: knob +3/+6/+12/+24 dB gave **0.00/0.00/0.00/0.00 dB**, now gives
+  **3.00/6.00/12.00/24.00 dB**. Four factory presets ask for 1.5–2.5 dB and now get it.
+- **Compressor threshold and ratio were the only unsmoothed controls in the module.** Both are
+  now one-poled at the same 15 ms as make-up (the ratio via its slope, so no per-sample
+  division). VERIFIED, worst step when flipped between extremes every block against a 440 Hz
+  sine whose own slope is 0.017: `comp_thresh 0.4116 → 0.0155`, `comp_ratio 0.3418 → 0.0155`.
+- **Img Width was a lie over 99 % of its range** (`Source/DSP/StereoImager.h`,
+  `Source/PluginProcessor.cpp`). The 0..200 % parameter went straight into a setter that
+  clamped to 0..2 as a linear side-gain multiplier, so the control saturated at 2 % and its
+  default position, 100 %, meant 200 % width. VERIFIED side gain at 0/25/50/75/100/150/200 %:
+  was `0.000/1.998/1.998/1.998/1.998/1.998/1.998`, now
+  `0.000/0.250/0.500/0.749/0.999/1.499/1.998`.
+- **In/Out gain smoothing was block-size dependent** (`Source/PluginProcessor.cpp`). The
+  coefficient was derived for a whole block and applied once per sample, so a "10 ms" ramp
+  settled in about 8 samples at a 64-sample block. VERIFIED worst step:
+  `out_gain 0.2735 → 0.0901`, `in_gain 0.1832 → 0.0626`.
+- **Host presets were additive and "Init" was a no-op** (`Source/PluginProcessor.cpp`).
+  `setCurrentProgram` now restores every parameter to its default before applying the preset.
+  VERIFIED: of the 132 ordered preset pairs, **118 used to land somewhere other than a fresh
+  load of the same preset; now 0 do**. State loading is untouched, so opening a session still
+  restores the saved parameters rather than the preset.
+- **The GM drum map was three recipes wearing ten names** (`Source/DSP/DrumEngine.h`).
+  `Voice::note` was declared and never written, so the note number was thrown away after
+  choosing a family: notes 41/45/48 (toms) came out BIT-IDENTICAL to note 36 (kick), 39 (clap)
+  and 49/57 (crash) bit-identical to 38 (snare), 51 (ride) identical to 42 (closed hat). Every
+  note now resolves a per-note `Spec` at note-on.
+  - Kick/tom/bongo: body pitch, strike pitch, sweep time and ring time per note. VERIFIED
+    dominant pitch: `36/41/45/48` was `96.1/96.1/96.1/96.1 Hz`, now `96.6/85.4/118.1/164.4`;
+    toms' −20 dB decay `233 ms → 617/652/628 ms`. Note 36's numbers are unchanged, so the main
+    kick sounds exactly as it did. The beater click was 12 *samples* long — i.e. its duration
+    changed with the sample rate — and is now specified in milliseconds.
+  - Snare/clap: the "filtered noise burst" was a one-pole LOW-pass. It is now two tuned shell
+    modes (185 and 330 Hz, roughly a fifth apart, as a snare head's first two modes are) plus
+    noise band-passed between a 300 Hz high-pass and a 9 kHz low-pass. VERIFIED spectral
+    centroid **223 Hz → 936 Hz**. Note 39 is a real clap: the same noise gated into four bursts
+    9 ms apart followed by the room tail, centroid 2745 Hz. Note 37 is a rim click, 40 a
+    tighter electric snare.
+  - Hats/rides/cymbals: six square oscillators tuned to the mode ratios of a free circular
+    plate (1, 2.08, 3.41, 3.89, 5.00, 6.43 — Kirchhoff plate theory) with per-hit scatter,
+    through a two-pole high-pass. VERIFIED on the closed hat: energy above 4 kHz relative to
+    below it **−2.5 dB → +17.6 dB**. Crashes 49/57 moved out of the snare family: the crash's
+    centroid **219 Hz → 10 477 Hz**, its −20 dB decay **209 ms → 1763 ms**.
+  - Voice lifecycle: a voice used to be dropped at 1 % of peak, a step at −40 dB. Each voice
+    now ramps linearly to exact zero over 4 ms starting where its tail is 60 dB down (or at
+    3.5 s). VERIFIED: the kick's last non-zero sample **−42.3 dB → −191.2 dB** below its peak.
+  - Velocity: amplitude still spans 10.2 dB from 0.25 to 1.0, and a softer hit is now also
+    darker and shorter (the noise low-pass and cymbal high-pass follow velocity, decays scale
+    0.70–1.00, a harder strike starts from a higher pitch).
+  - Per-sample `std::exp()` is gone from every drum envelope and the pitch sweep — recursive
+    multipliers now.
+- **The saw oscillators were not band-limited** (`Source/DSP/InstrumentBank.h`). PolyBLEP
+  (Välimäki/Huovilainen), two comparisons per oscillator per sample. VERIFIED, loudest partial
+  BELOW the note's own fundamental at C7 (note 96, 2093 Hz):
+  `Pluck −27.0 → −79.7`, `Lead −26.8 → −97.3`, `Pad −14.4 → −75.8`, `Rage −9.1 → −92.9 dBc`.
+  Affects 11 of the 16 programs.
+- **Tube saturation was 1.6 dB down and 3rd-harmonic dominant** (`Source/DSP/Saturation.h`).
+  `(tanh(x) + 0.2·tanh(x)²)/1.2` normalises the peak, not the small-signal gain, and its
+  squared term saturated while `tanh` kept squaring up into odd harmonics. It is now
+  `tanh(k·x + b) − tanh(b)` with `k = 1/(1 − tanh²b)` and `b = 0.30 + 0.40·drive`, which is a
+  biased (asymmetric) stage — the thing that gives a single-ended triode its 2nd harmonic.
+  VERIFIED unity at minimum drive: **−1.61 dB → −0.02 dB** (Tape −0.04, Soft −0.02, Exciter
+  −0.00 were already right). VERIFIED H2/H3 in dBc: drive 0.15 @ −6 dBFS `−18.8/−28.3`,
+  0.25 @ −6 `−16.8/−24.1`, 0.50 @ −18 `−17.9/−37.2`. At 0.50 @ −6 and 1.00 @ −6 the stage is
+  in hard clipping and the odd harmonics catch up, which an overdriven triode also does; those
+  points are measured and printed but not asserted. Settled peak at drive 1.0 on a −3 dBFS
+  200 Hz sine: 1.090. Oversampling still keeps fold-down aliasing at −138 dBc or lower.
+- **`-Wshadow` at three sites**: `prepareToPlay`'s `blockSize` shadowed
+  `AudioProcessor::blockSize`, `PowerToggle`'s constructor argument shadowed its member, and a
+  local in `SmokeTest.cpp`. `-Wall -Wextra -Wshadow -Wnon-virtual-dtor -Woverloaded-virtual
+  -Wunused -Werror` on the project's own sources is clean and CI enforces it.
+- **Dead code**: `Saturation::processChunk`'s `shapingOff` parameter (always `false`, re-tested
+  on every oversampled sample) and `InstrumentBank::preparedBlock` are gone.
+
+### Measured and deliberately NOT changed
+
+- **Reverb diffusers.** The four "allpasses" are not allpasses: `out = 0.75·d − 0.5·x` against
+  a feedback of 0.5 gives |H| from −6.0 dB at DC to −1.6 dB at the line's Nyquist, which looked
+  like the cause of the tank's 3.22 dB of tilt across 125 Hz..8 kHz. Rebuilding them as proper
+  Schroeder allpasses and re-trimming the wet level to match made every number **worse**:
+  late-field spread **3.22 → 3.97 dB**, L/R correlation of the tail **0.163 → 0.289**. The tilt
+  is the comb bank's sparse low-frequency modal density; flattening it needs a different
+  topology (an FDN), not a coefficient. Reverted.
+- **Notes 35–49 are captured by the drums on every MIDI channel**, so the instrument cannot
+  play B0–C#2 from an ordinary keyboard track. Narrowing the window would silently turn drum
+  parts in saved sessions into synth parts.
+- **Reverb pre-delay is applied after the tank**, so it moves the whole wet signal rather than
+  only the onset. Changing it changes what every existing reverb setting sounds like.
+- **Compressor attack is about twice the knob** (knob 1/10/50 ms → 2.83/20.33/94.83 ms to 63 %
+  of the final gain reduction), because the detector takes `max(peak, 1.414·√RMS)` with an 8 ms
+  RMS window. That hybrid is what makes the compressor ignore crest factor — a square and a
+  sine at the same peak level are only 2.16 dB apart — so the knob's units are approximate
+  rather than wrong.
+- **The delay's always-on 0.4 Hz wobble.** Depth is `min(time × 0.0015, 1.5) ms` with no
+  control. VERIFIED pitch swing on a 1 kHz tone: **1.55 cents** peak-to-peak at 100 ms,
+  **6.76** at 500 ms, **13.47** at 2000 ms. Tape/BBD character; now documented and asserted so
+  it cannot grow unnoticed.
+
+### Repo hygiene
+
+134 files / **66,836,259 bytes (63.7 MB)** removed from HEAD. All of it is still in git history
+at `bed39b7` and is recoverable; nothing was rewritten or purged.
+
+- `Assets/Sounds/source_zips/` (63 MB: two GareBear99 kits and a PD loop). No source file,
+  CMake rule or CI step ever loaded them — `InstrumentBank` and `DrumEngine` synthesise every
+  voice, and there is no `juce_add_binary_data`, no `AudioFormatManager` and no
+  `createReaderFor` anywhere in `Source/`. The licence review (now recorded in `README.md`) had
+  already concluded none of the three could be bundled. Restore with
+  `git show bed39b7:Assets/Sounds/source_zips/<name> > <name>`.
+- `screenshots/` (37 PNGs named after browser games), `.opencode/`,
+  `.claude/skills/unity-cli/`, `Tests/block-blast-test.js`,
+  `tools/{harness,balance,shot,dbg,patch-dbg}.js` — another project's leftovers.
+- `AGENTS.md` (browser-game tooling), `IMPROVEMENT_LOG.md` (a `block-blast.html` changelog),
+  `SWARM_BRIEF.md` (an HTML5 arcade brief), `WORKLOG.md` (a chess session),
+  `tasks/{plan,todo}.md` (a Discord-clone spec) — six process documents, none about this
+  plugin, and no `README.md` at all.
+- There is now one `README.md` (what it is, how to build on Windows and Linux, how to run the
+  tests, what every control does, the frozen sample-licensing decisions, ranked known issues),
+  this `CHANGELOG.md`, and `AUDIT.md`. `HANDOVER.md`'s real content moved into the README; its
+  stale claims are gone (it told the reader to expect 30 checks from a 151-check suite,
+  described the UI note queue as `CriticalSection`-guarded when it is an `AbstractFifo`, and
+  listed `IS_SYNTH FALSE` when `CMakeLists.txt` sets it `TRUE`).
+- Kept: `tools/build_plugin.bat`, `build_probe.bat`, `build_smoke.bat` (all still name targets
+  that exist) and `build_assets.ps1` (the maintainer's, though unfinished — its manifest
+  entries all have an empty `id` and `file` and nothing consumes its output).
+
+### Behaviour changes
+
+- Enabling the imager at its default no longer doubles the side signal (6 dB less side).
+- Selecting a host preset now resets every parameter to its default first. Loading a saved
+  session is unaffected.
+- Tube saturation is 1.6 dB louder at low drive with a different harmonic balance. Presets 2,
+  7 and 11 use it.
+- Drum notes 37/39/40, 41/43/45/47/48/50, 49/51/52/53/55/57/59 and 60/61 all sound different,
+  because they used to be duplicates of 36, 38 or 42. Notes 36, 38 and 42/44/46 keep their
+  character. Voice levels were re-voiced so every note's peak is within 4 dB of the old
+  build's kick (−4.3 dBFS at velocity 1 with Drum Level at 0 dB).
+- Saw-based instrument programs have far less aliasing, which makes high notes sound cleaner
+  and slightly less bright.
+
+
 ## 2026-09-20 (wave 2) — refinements, CI
 
 All measured with `Tests/SmokeTest.cpp` (now 151 checks) and `Tests/EditorProbe.cpp` (9 checks).

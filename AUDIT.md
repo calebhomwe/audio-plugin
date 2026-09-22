@@ -1,5 +1,8 @@
 # MixAgent — audit
 
+**Status: every finding below is marked either FIXED (with the after-measurement) or
+LEFT OPEN (with the reason). Summary table at the bottom.**
+
 Headless audit on Linux (gcc 13, JUCE 8.0.9, Release). Every finding below names a
 `file:line`, a mechanism, and the command whose output proves it. Things I only suspect are
 in a separate list at the end and are labelled as such.
@@ -56,6 +59,9 @@ make-up gain with the signal 20 dB below threshold:
 
 Four factory presets set `comp_makeup` (1.5–2.5 dB) and get nothing for it.
 
+**FIXED.** Gain reduction and make-up are separate factors now; the clamp applies only to the
+reduction. After: `0.00 / 3.00 / 6.00 / 12.00 / 24.00 dB`.
+
 ### C2 — Img Width is a lie over 99 % of its range. `Source/PluginProcessor.cpp:75,151` + `Source/DSP/StereoImager.h:80`
 
 The parameter is declared `0..200` (a percentage) and handed straight to
@@ -80,6 +86,11 @@ Consequence: switching the imager on at its default doubles the side signal — 
 blow-up and a mono-compatibility problem. Presets 4, 7 and 9 ask for 140/135/150 % and all
 get 200 %.
 
+**FIXED.** `setWidth` became `setWidthPercent` and divides by 100. After:
+`0.000 / 0.250 / 0.500 / 0.749 / 0.999 / 1.499 / 1.998` for 0/25/50/75/100/150/200 %.
+Behaviour change: an existing session with the imager engaged loses 6 dB of side signal,
+because it was never supposed to have it.
+
 ### C3 — Input/Output gain smoothing is block-size dependent. `Source/PluginProcessor.cpp:380`
 
 ```cpp
@@ -100,6 +111,8 @@ per sample of its own accord):
   in_gain         0.1832
 ```
 
+**FIXED.** The coefficient is per sample now. After: `out_gain 0.0901, in_gain 0.0626`.
+
 ### C4 — Compressor threshold and ratio are not smoothed at all. `Source/DSP/Compressor.h:133-134`
 
 `thresholdDb` and `ratio` are read raw into `tDb`/`slopeFactor` once per block. Everything
@@ -112,6 +125,9 @@ Proof (same click hunt):
   comp_thresh     0.4116
   comp_ratio      0.3418
 ```
+
+**FIXED.** Both are one-poled at the same 15 ms as make-up (the ratio via its slope, so there
+is no per-sample division). After: `comp_thresh 0.0155, comp_ratio 0.0155`.
 
 ---
 
@@ -147,6 +163,11 @@ family, crashes/clap/side stick → snare family …) VERIFIED: … 57 = crash (
 3.4 kHz)". The mapping is real; the implication that those notes sound like the instruments
 they are named after is not.
 
+**FIXED.** Every note resolves a `Spec` at note-on. Dominant pitch after:
+36 → 96.6 Hz, 41 → 85.4, 45 → 118.1, 48 → 164.4. The crash moved into the cymbal family:
+centroid 219 Hz → 10 477 Hz, −20 dB decay 209 ms → 1763 ms. The clap is four gated bursts,
+centroid 2745 Hz. Note 36 (the main kick), 38 and 42/44/46 keep their numbers.
+
 ### M2 — The snare's "filtered noise burst" is low-passed. `Source/DSP/DrumEngine.h:242`
 
 ```cpp
@@ -159,6 +180,9 @@ one-pole low-pass, so the snare has essentially no top end.
 Proof: `snare: body partial -13.6 dB, 4 kHz noise -42.2 dB, centroid 223 Hz`. A snare drum's
 spectral centroid sits in the 1–3 kHz region.
 
+**FIXED.** Two tuned shell modes (185 and 330 Hz) plus noise band-passed between a 300 Hz
+high-pass and a 9 kHz low-pass. After: centroid 936 Hz.
+
 ### M3 — Drum voices are cut off 40 dB down. `Source/DSP/DrumEngine.h:279`
 
 ```cpp
@@ -168,6 +192,9 @@ if (envExp(v.pos, tail) < 0.01f)   // -40 dB
 
 Proof: `kick: last non-zero sample is -42.3 dB below the peak (the step to silence)`. That is
 a step, not a fade — at a realistic bus level it is an audible tick at the end of every hit.
+
+**FIXED.** Each voice ramps linearly to exact zero over 4 ms starting where its tail is 60 dB
+down, or at 3.5 s, whichever comes first. After: `-191.2 dB`.
 
 ### M4 — The saw oscillators are not band-limited. `Source/DSP/InstrumentBank.h:338`
 
@@ -185,6 +212,9 @@ harmonic of f0):
 
 Rage at -9 dBc is fold-down loud enough to be part of the sound. This affects 11 of the 16
 programs (every `r.saw` recipe) and is worst exactly where a lead is played.
+
+**FIXED.** PolyBLEP (Välimäki/Huovilainen), two comparisons per oscillator per sample. After:
+`Pluck -79.7, Lead -97.3, Pad -75.8, Rage -92.9 dBc` — between 50 and 84 dB less fold-down.
 
 ### M5 — Tube mode is 1.6 dB below unity and 3rd-harmonic dominant. `Source/DSP/Saturation.h:292`
 
@@ -218,6 +248,14 @@ away as drive rises and the 3rd takes over:
 (The 2nd-harmonic term is `0.2·tanh(x)²`, which saturates while `tanh(x)` keeps squaring up
 into odd harmonics.) Tape/Soft being 3rd-dominant is correct — those are symmetric curves.
 
+**FIXED.** `tanh(k·x + b) − tanh(b)` with `k = 1/(1 − tanh²b)` and `b = 0.30 + 0.40·drive`.
+Unity at zero drive: −1.61 dB → −0.02 dB. Harmonics after (H2 / H3, dBc):
+drive 0.15 @ −6 dBFS `−18.8 / −28.3`; 0.25 @ −6 `−16.8 / −24.1`; 0.50 @ −18 `−17.9 / −37.2`.
+At 0.50 @ −6 (`−15.8 / −15.1`) and 1.00 @ −6 (`−25.1 / −9.8`) the stage is in hard clipping
+and the odd harmonics catch up, which is what an overdriven triode does; those two points are
+measured and printed but not asserted. Settled peak at drive 1.0 on a −3 dBFS 200 Hz sine:
+1.090. Behaviour change: Tube is 1.6 dB louder at low drive.
+
 ### M6 — Host presets are additive; "Init" resets nothing. `Source/PluginProcessor.cpp:614+`
 
 `setCurrentProgram` writes only the parameters each preset mentions, and `case 0: break;`
@@ -231,6 +269,10 @@ the same preset into a fresh processor):
   worst: Vocal Presence -> Init leaves 23 parameters at the previous preset's value
 ```
 
+**FIXED.** `setCurrentProgram` restores every parameter to its default before applying the
+preset. After: `0 of 132`. State loading is untouched, so opening a session still restores the
+saved parameters rather than the preset.
+
 ### M7 — Notes 35–49 are stolen from the instrument on every MIDI channel. `Source/PluginProcessor.cpp:282`
 
 ```cpp
@@ -241,10 +283,17 @@ A bass line written on channel 1 between B0 and C#2 plays drums. Channel 10 alre
 whole GM map; the unconditional 35–49 window is a compatibility shim from an earlier build
 that costs the instrument its bottom 15 semitones.
 
+**LEFT OPEN, deliberately.** Narrowing the window would silently turn drum parts in saved
+sessions into synth parts. Documented in `README.md` under "Known issues and debt".
+
 ### M8 — 63 MB and six process documents in the repo belong to other projects.
 
 See "Repo hygiene" below. `HANDOVER.md:23` also tells the owner to expect
 "ALL TESTS PASSED (30 checks)"; the suite has 151.
+
+**FIXED.** 134 files / 66,836,259 bytes removed from HEAD (recoverable from history — the
+commands are in `README.md`). The six process documents collapsed into one `README.md`, which
+the repo did not have at all, plus `CHANGELOG.md` and this file.
 
 ---
 
@@ -270,20 +319,37 @@ Measured effect on the late field (damping 0, decay 2 s, size 0.7, wet only):
 ```
 
 So the audible consequence is 3.2 dB of tilt, not the 4.4 dB ripple the coefficients alone
-suggest — the eight combs dominate. Worth fixing only if the wet level can be held constant.
+suggest — the eight combs dominate.
+
+**LEFT OPEN, and the attempt is the reason.** Rebuilding the four sections as proper
+unity-gain Schroeder allpasses (`out = −g·x + d`, `buf = x + g·d`, `g = 0.5`) and re-trimming
+the wet input so the tail's level was unchanged made every number *worse*: late-field spread
+3.22 → 3.97 dB, L/R correlation of the tail 0.163 → 0.289. The tilt is the comb bank's sparse
+low-frequency modal density, not the diffusers; flattening it needs a different topology (an
+FDN), not a coefficient. The change was reverted and the measurement is recorded in
+`Tests/CharacterTest.cpp` next to the 4.5 dB guard.
 
 ### N2 — Dead code. `Source/DSP/Saturation.h:154,185`
 
 `processChunk(..., bool shapingOff)` is only ever called with `false`, and the flag is
 re-tested on every oversampled sample (`for (int i = 0; i < osNum && !shapingOff; ++i)`).
 
+**FIXED.** Parameter and test removed.
+
 ### N3 — Dead members. `Source/DSP/DrumEngine.h:139` (`Voice::note`), `Source/DSP/DrumEngine.h:150` and `Source/DSP/InstrumentBank.h` (`preparedBlock`, written in `prepare`, read nowhere).
+
+**FIXED.** `Voice::note` is now written and used to pick the drum's recipe; `preparedBlock` is
+gone from both classes.
 
 ### N4 — Reverb pre-delay is applied *after* the tank. `Source/DSP/Reverb.h:285,308`
 
 Pre-delay conventionally sets the gap between the dry sound and the first reflection. Here it
 delays the whole wet signal, tail included, which sounds the same for a steady input but
 moves the entire reverb rather than only its onset.
+
+**LEFT OPEN.** Moving the pre-delay in front of the tank changes what every existing reverb
+setting sounds like, for a difference that is inaudible on sustained material. Documented in
+`README.md`.
 
 ### N5 — Reverb parameter smoothing follows the host block size. `Source/DSP/Reverb.h:52-54`
 
@@ -297,6 +363,9 @@ host delivers a different block size.
 `AudioProcessor::blockSize`; `Source/UI/Style.h:49` shadows `PowerToggle::text`;
 `Tests/SmokeTest.cpp:1031` shadows a local `inc`.
 
+**FIXED** at all three sites. `-Wall -Wextra -Wshadow -Wnon-virtual-dtor -Woverloaded-virtual
+-Wunused -Werror` on the project's own sources is clean, and CI enforces it.
+
 ### N7 — The delay has an always-on, unlabelled 0.4 Hz wobble. `Source/DSP/Delay.h:186`
 
 Depth is `min(time × 0.0015, 1.5) ms` and there is no control for it. Measured pitch swing on
@@ -309,7 +378,8 @@ a 1 kHz tone:
 ```
 
 This is a tape/BBD character choice and it is defensible; it is listed here because it is
-undocumented and not switchable, not because it is wrong.
+undocumented and not switchable, not because it is wrong. **Now documented** in `README.md`
+with these numbers, and asserted in `Tests/CharacterTest.cpp` so it cannot grow unnoticed.
 
 ### N8 — Compressor attack is about twice the knob value. `Source/DSP/Compressor.h:80-88`
 
@@ -433,3 +503,34 @@ still name targets that exist (`MixAgent_VST3`, `MixAgent_Standalone`, `EditorPr
 - `maxPreDelaySamples()` (`Source/DSP/Reverb.h:172`) reads `predelays[0].maxLen`, which is 0
   until `prepare()` runs; `setPreDelayMs` before `prepare` would therefore clamp to -2.
   Suspected benign because `prepare` recomputes `preDelayF` afterwards.
+
+---
+
+## Summary
+
+| # | Severity | Finding | Status |
+|---|---|---|---|
+| C1 | CRITICAL | Compressor make-up gain unreachable | FIXED — 0.00 → 3.00/6.00/12.00/24.00 dB |
+| C2 | CRITICAL | Img Width saturates at 2 %; 100 % means 200 % | FIXED — side gain now tracks the percentage |
+| C3 | CRITICAL | In/Out gain smoothing ~blockSize times too fast | FIXED — per-sample coefficient |
+| C4 | CRITICAL | Compressor threshold/ratio unsmoothed | FIXED — step 0.41/0.34 → 0.0155 |
+| M1 | MAJOR | 10 drum notes, 3 waveforms, bit-identical | FIXED — per-note Spec table |
+| M2 | MAJOR | Snare noise low-passed, no top | FIXED — centroid 223 → 936 Hz |
+| M3 | MAJOR | Drum voices cut off 40 dB down | FIXED — last sample −42.3 → −191.2 dB |
+| M4 | MAJOR | Naive saw, fold-down to −9 dBc | FIXED — PolyBLEP, −76 to −97 dBc |
+| M5 | MAJOR | Tube mode −1.6 dB and 3rd-dominant | FIXED — unity, 2nd leads by 7–19 dB |
+| M6 | MAJOR | Presets additive, "Init" a no-op | FIXED — 118/132 contaminated → 0/132 |
+| M7 | MAJOR | Notes 35–49 stolen from the instrument on all channels | LEFT OPEN — would change saved sessions |
+| M8 | MAJOR | 63.7 MB unreferenced, six stray process docs, no README | FIXED — 134 files removed, one README |
+| N1 | MINOR | Reverb diffusers are not allpasses | LEFT OPEN — fixing them measured *worse* |
+| N2 | MINOR | `shapingOff` dead parameter | FIXED |
+| N3 | MINOR | Dead members (`Voice::note`, `preparedBlock`) | FIXED |
+| N4 | MINOR | Reverb pre-delay after the tank | LEFT OPEN — would change every reverb setting |
+| N5 | MINOR | Reverb param smoothing follows the block size | LEFT OPEN — inaudible, documented |
+| N6 | MINOR | `-Wshadow` at three sites | FIXED — strict set clean, enforced in CI |
+| N7 | MINOR | Undocumented always-on delay wobble | DOCUMENTED + asserted (1.55–13.5 cents) |
+| N8 | MINOR | Compressor attack ~2× the knob | LEFT OPEN — the RMS branch is the feature |
+| N9 | MINOR | Width 0 mono fold differs by rounding | LEFT OPEN — −145.9 dBc |
+
+Test counts: 151 → 151 (`MixAgentSmokeTest`), 0 → 10 (`MixAgentAuditTest`),
+0 → 42 (`MixAgentCharacterTest`), 9 → 9 (`EditorProbe`). 151 → 212 checks in total.

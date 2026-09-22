@@ -18,9 +18,13 @@ host input ─→ In Gain ─→ EQ ─→ Saturation ─→ Compressor ─→ I
   Brass, Strings, E.Piano, Organ, Sub, Dark Bell, Glass Pluck, Vox Choir, Soft Soul, Bounce, Rage),
   24 voices, chromatic, with pitch bend (±2 semitones), CC64 sustain, CC120/123 and MIDI program
   change 0–15.
-- **Drum engine** — `Source/DSP/DrumEngine.h`. Synthesised one-shots on a GM-style note map: a
-  pitch-dropping resonator for kicks and toms, a tuned body plus a noise burst for snares and
-  claps, inharmonic metal for hats, rides and crashes.
+- **Drum engine** — `Source/DSP/DrumEngine.h`. Synthesised one-shots on a GM-style note map,
+  with a per-note table so each note is its own drum: a bridged-T style pitch-dropping
+  resonator for kicks (36 Hz–42 Hz body), toms (74–178 Hz) and bongos (225/310 Hz); two tuned
+  shell modes plus band-passed noise for snares, the rim click and a four-burst clap; and six
+  square oscillators at the mode ratios of a free circular plate (Kirchhoff plate theory)
+  through a two-pole high-pass for hats, rides, the ride bell, splash, chinese cymbal and
+  crashes. Velocity changes brightness and length, not just level.
 - **Mix chain** — `Source/DSP/`. 7-band EQ, 4×-oversampled saturation (Tube/Tape/Soft/Exciter), a
   feed-forward compressor with a soft knee, a mid/side imager, a modulated delay, a Schroeder
   reverb and a lookahead true-peak limiter.
@@ -114,8 +118,10 @@ ubuntu-24.04 with a cached JUCE clone.
 | `HS Freq`, `HS Gain` | 800–20000 Hz, ±15 dB | high shelf |
 | `LP On`, `LP Freq` | 500–20000 Hz | 12 dB/oct low-pass |
 
-**Saturation** — `Mode` picks Tube (asymmetric, 2nd-harmonic dominant), Tape (symmetric with a
-12 kHz roll-off), Soft (cubic) or Exciter (high-band only). `Drive` adds up to 24 dB of input
+**Saturation** — `Mode` picks Tube (a biased, asymmetric single-ended stage: the 2nd harmonic
+leads the 3rd by 7–19 dB until it is driven into hard clipping), Tape (symmetric with a 12 kHz
+roll-off), Soft (cubic) or Exciter (high-band only). Every mode is within 0.04 dB of unity at
+zero drive. `Drive` adds up to 24 dB of input
 gain into the shaper; `Mix` blends dry/wet; `Out` trims ±12 dB. Runs at 4× and reports its
 latency, which stays constant whether the module is on or off.
 
@@ -125,8 +131,9 @@ is a hybrid of peak and an 8 ms RMS, which makes the gain reduction nearly indep
 factor (a square and a sine at the same peak level land 2.2 dB apart) at the cost of the Attack
 knob being approximate rather than exact — see `AUDIT.md` N8.
 
-**Imager** — `Width` 0…200 % (0 % is a mono sum, 100 % is unaltered, 200 % doubles the side
-signal), `Balance` −1…+1 with a constant-power cosine law, `Mono` folds to mono.
+**Imager** — `Width` 0…200 % (measured side gain: 0.000 at 0 %, 0.500 at 50 %, 0.999 at 100 %,
+1.998 at 200 % — 100 % really is unaltered), `Balance` −1…+1 with a constant-power cosine law,
+`Mono` folds to mono.
 
 **Delay** — `Time` 20…2000 ms, `Feedback` 0…0.95, `Mix`, `Damp` (a one-pole low-pass inside the
 feedback loop) and `Width` (ping-pong cross-feed). The read head carries a permanent 0.4 Hz
@@ -140,7 +147,8 @@ wobble whose depth follows the delay time: 1.6 cents peak-to-peak at 100 ms, 13.
 with a 4× polyphase true-peak sidechain; measured with an independent 8× interpolator the output
 stays *under* the ceiling on inter-sample-peak material.
 
-**Instruments and drums** — `Inst On`, `Instrument` (the 16 programs), `Inst Level` −40…+6 dB,
+**Instruments and drums** — the saw oscillators are band-limited (PolyBLEP), so fold-down
+aliasing at C7 stays below −75 dBc. `Inst On`, `Instrument` (the 16 programs), `Inst Level` −40…+6 dB,
 `Drum Level` −40…+6 dB. The 12 pads under the FX panels are a C3–B3 preview keyboard and always
 play the instrument, never the drums.
 
@@ -200,5 +208,15 @@ Ranked; the measurements behind them are in `AUDIT.md`.
    RAM, then play from a voice) is designed but not built.
 6. **`-Wold-style-cast` is not adopted.** 1002 numeric C-style casts are the codebase's style;
    `-Wall -Wextra -Wshadow -Wnon-virtual-dtor -Woverloaded-virtual -Wunused` is clean.
-7. **Nothing has been verified in a real host.** No DAW, no `pluginval` and no audio device were
+7. **Reverb late-field tilt.** The tank is flat to within 3.22 dB from 125 Hz to 8 kHz with
+   damping off. The four diffusers are not unity-gain allpasses, which looks like the cause —
+   but rebuilding them as proper allpasses measured *worse* (spread 3.22 → 3.97 dB, L/R
+   correlation 0.163 → 0.289). The tilt is the comb bank's sparse low-frequency modal density;
+   flattening it needs an FDN, not a coefficient.
+8. **Compressor Attack is approximate, by design.** The detector takes
+   `max(peak, 1.414·√RMS)` with an 8 ms RMS window, which is what makes the gain reduction
+   nearly independent of crest factor — and which stretches the knob: 1/10/50 ms measure
+   2.83/20.33/94.83 ms to 63 % of the final reduction. Making it exact means dropping the RMS
+   branch and changing how the compressor responds to everything.
+9. **Nothing has been verified in a real host.** No DAW, no `pluginval` and no audio device were
    available; `EditorProbe` proves the editor's wiring, not its appearance.

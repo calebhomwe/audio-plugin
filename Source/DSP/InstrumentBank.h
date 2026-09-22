@@ -46,8 +46,7 @@ public:
     void prepare(double sampleRate, int blockSize)
     {
         sr = sampleRate > 1.0 ? sampleRate : 44100.0;
-        preparedBlock = juce::jmax(blockSize, 1);
-        scratch.setSize(2, preparedBlock, false, false, true);
+        scratch.setSize(2, juce::jmax(blockSize, 1), false, false, true);
         reset();
     }
 
@@ -273,7 +272,6 @@ private:
     float bendSemitones = 0.0f;
     float bendMult = 1.0f;
     double sr = 44100.0;
-    int preparedBlock = 1;
     float levelDb = 0.0f;
     bool enabled = true;
     juce::AudioBuffer<float> scratch;
