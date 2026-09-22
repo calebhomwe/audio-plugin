@@ -791,7 +791,12 @@ static void drumSuite()
         const float bongoZ = zeroCrossingFreq(out, h.proc->getLatencySamples(), 2205, 44100.0);
         h.runSilence(2.5f);
         std::cout << "  crash2 (57) zcr " << crashZ << ", bongo (60, ch10) zcr " << bongoZ << "\n";
-        check(crashZ > 1000.0f && bongoZ < 300.0f, "GM 57 renders as a crash, 60 (channel 10) as a drum-family hit");
+        // 57 is a crash: a high-passed inharmonic metal cluster, so its zero
+        // crossings sit in the kilohertz. 60 is a hi bongo: a tuned membrane
+        // around 310 Hz. Before the per-note drum table, 60 was the bass-drum
+        // recipe (a 42 Hz body) and 57 was the snare recipe.
+        check(crashZ > 3000.0f && bongoZ > 200.0f && bongoZ < 700.0f,
+              "GM 57 renders as metal in the kilohertz, 60 (channel 10) as a tuned bongo");
         // notes above 49 on channel 1 still belong to the instrument
         Harness g;
         g.disableAllModules();
