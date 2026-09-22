@@ -605,7 +605,7 @@ still name targets that exist (`MixAgent_VST3`, `MixAgent_Standalone`, `EditorPr
 | N13 | MINOR | `getTailLengthSeconds()` fixed at 5 s vs a 68 s measured tail | FIXED — computed from the settings, capped at 30 s |
 
 Test counts: 151 → 151 (`MixAgentSmokeTest`), 0 → 11 (`MixAgentAuditTest`),
-0 → 42 (`MixAgentCharacterTest`), 9 → 13 (`EditorProbe`). **160 → 217 checks** in total,
+0 → 42 (`MixAgentCharacterTest`), 9 → 12 (`EditorProbe`). **160 → 216 checks** in total,
 29.1 s for the whole `ctest` run.
 
 Sanitizers: the whole suite under `-fsanitize=address,undefined` —

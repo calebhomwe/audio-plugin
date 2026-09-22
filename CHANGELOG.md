@@ -20,7 +20,7 @@ that proves it, marked FIXED with an after-measurement or LEFT OPEN with a reaso
   interpolator and wobble, reverb late-field flatness and decorrelation, imager width mapping,
   every drum voice's spectrum/decay/velocity response, instrument tuning/aliasing/release/voice
   stealing.
-- 160 → 217 checks in total across four targets, all registered with CTest and wired into CI.
+- 160 → 216 checks in total across four targets, all registered with CTest and wired into CI.
 - Sanitizers: the whole suite under `-fsanitize=address,undefined` is clean — 151/151, 11/11
   and 42/42, exit 0, no AddressSanitizer, LeakSanitizer or UndefinedBehaviorSanitizer report.
 
@@ -121,7 +121,7 @@ that proves it, marked FIXED with an after-measurement or LEFT OPEN with a reaso
   window appeared. All three of the editor's own initial selections pass
   `dontSendNotification` now, and `EditorProbe` constructs the editor, runs the message loop
   and asserts that not one parameter moved. This was caught by the probe inside the same wave.
-- `EditorProbe`: 9 → 13 checks.
+- `EditorProbe`: 9 → 12 checks.
 
 - **The reported tail length was a fixed 5 s.** A host uses `getTailLengthSeconds()` to decide
   how long to keep calling `processBlock` after the transport stops. VERIFIED with an impulse:
