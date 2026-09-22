@@ -288,8 +288,23 @@ private:
             }
             default:
             {
-                const float t = std::tanh(x);
-                return (t + 0.2f * t * t) / 1.2f;
+                // Tube: a single-ended triode stage. The thing that makes such a
+                // stage sound the way it does is that it is ASYMMETRIC - the grid
+                // sits off centre, so the curve compresses one half of the wave
+                // harder than the other and the 2nd harmonic dominates the 3rd.
+                // A biased tanh gives exactly that, and normalising by the
+                // derivative at the origin (1 - tanh^2 b) keeps the small-signal
+                // gain at unity, which the old (tanh + 0.2 tanh^2)/1.2 did not:
+                // that form was 1/1.2 = -1.58 dB down at zero drive, and its
+                // squared term saturated while tanh kept squaring up into odd
+                // harmonics, so the 3rd overtook the 2nd as drive rose.
+                // The bias deepens with drive so the asymmetry survives hard
+                // clipping; the DC offset it introduces is removed by the servo
+                // in processChunk.
+                const float b = 0.30f + 0.40f * drive;
+                const float tb = std::tanh(b);
+                const float norm = 1.0f / (1.0f - tb * tb);
+                return (std::tanh(x + b) - tb) * norm;
             }
         }
     }

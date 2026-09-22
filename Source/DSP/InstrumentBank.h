@@ -335,12 +335,31 @@ private:
         return *best;
     }
 
-    static float sawWave(float ph)
+    // Band-limited sawtooth. A naive 2*phase-1 ramp has a discontinuity every
+    // cycle, and all the harmonics above Nyquist that implies fold straight back
+    // down into the audible band - at C7 that was audible as loud partials BELOW
+    // the note's own fundamental. PolyBLEP subtracts a two-sample polynomial
+    // approximation of the band-limited step at the wrap, which removes most of
+    // it for the cost of two comparisons (Valimaki/Huovilainen, "Antialiasing
+    // Oscillators in Subtractive Synthesis").
+    static float sawWave(float ph, float inc)
     {
         float x = ph;
         if (x >= 1.0f) x = std::fmod(x, 1.0f);
         if (x < 0.0f) x += 1.0f;
-        return 2.0f * x - 1.0f;
+        float y = 2.0f * x - 1.0f;
+        const float dt = inc > 1.0e-7f ? inc : 1.0e-7f;
+        if (x < dt)
+        {
+            const float t = x / dt - 1.0f;
+            y -= -t * t;
+        }
+        else if (x > 1.0f - dt)
+        {
+            const float t = (x - 1.0f) / dt + 1.0f;
+            y -= t * t;
+        }
+        return y;
     }
 
     static float ratePerSecToCoef(float ratePerSec, double sampleRate)
@@ -611,8 +630,8 @@ private:
                     if (v.oscPhase[o] >= 1.0f) v.oscPhase[o] -= 1.0f;
                     v.oscPhaseR[o] += incR[o];
                     if (v.oscPhaseR[o] >= 1.0f) v.oscPhaseR[o] -= 1.0f;
-                    sL += sawWave(v.oscPhase[o]) * inv;
-                    sR += sawWave(v.oscPhaseR[o]) * inv;
+                    sL += sawWave(v.oscPhase[o], incL[o]) * inv;
+                    sR += sawWave(v.oscPhaseR[o], incR[o]) * inv;
                 }
             }
             else if (r.organ)
