@@ -223,3 +223,23 @@ Ranked; the measurements behind them are in `AUDIT.md`.
    block size promised in `prepare`, and `updateCoefficients()` runs once per `process()` call).
 9. **Nothing has been verified in a real host.** No DAW, no `pluginval` and no audio device were
    available; `EditorProbe` proves the editor's wiring, not its appearance.
+
+## Licence
+
+Copyright (C) 2026 Caleb
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License along
+with this program. If not, see <https://www.gnu.org/licenses/>.
+
+See [`LICENSE`](LICENSE) for the full text and
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the licences of the
+dependencies this project builds against.
