@@ -16,7 +16,10 @@ cmake --build build -j3
 ./build/MixAgentSmokeTest_artefacts/Release/MixAgentSmokeTest      # end-to-end plugin behaviour
 ./build/MixAgentAuditTest_artefacts/Release/MixAgentAuditTest      # dead knobs, allocations, torture, presets
 ./build/MixAgentCharacterTest_artefacts/Release/MixAgentCharacterTest   # per-module characterisation
+xvfb-run -a ./build/EditorProbe_artefacts/Release/EditorProbe           # editor wiring and readouts
 ```
+
+25 findings: 4 CRITICAL, 8 MAJOR, 13 MINOR, plus a COSMETIC list and an unproven list.
 
 ---
 
@@ -28,6 +31,7 @@ cmake --build build -j3
 | Allocation detector | `Tests/AuditTest.cpp` `allocationSuite` | `operator new` armed only across `processBlock`, 24 rate/block combinations |
 | State/automation torture | `Tests/AuditTest.cpp` `tortureSuite` | 1000x round-trip, garbage/truncated/future state, per-parameter click hunt |
 | Preset integrity | `Tests/AuditTest.cpp` `presetSuite` | every ordered pair of host presets vs a fresh load |
+| Reported tail | `Tests/AuditTest.cpp` `tailSuite` | `getTailLengthSeconds()` against the measured -60 dB tail |
 | Module characterisation | `Tests/CharacterTest.cpp` | transfer curves, harmonic series, RT60, true peak, drum/voice spectra |
 
 ---
