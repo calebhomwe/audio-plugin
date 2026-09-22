@@ -181,18 +181,18 @@ void MixAgentAudioProcessor::syncModules()
             handleParameter(rp->paramID, rp->getNormalisableRange().convertFrom0to1(rp->getValue()));
 }
 
-void MixAgentAudioProcessor::prepareToPlay(double sr, int blockSize)
+void MixAgentAudioProcessor::prepareToPlay(double sr, int maxBlockSize)
 {
     sampleRate = sr;
-    eq.prepare(sr, blockSize);
-    saturator.prepare(sr, blockSize);
-    compressor.prepare(sr, blockSize);
-    imager.prepare(sr, blockSize);
-    delay.prepare(sr, blockSize);
-    reverb.prepare(sr, blockSize);
-    limiter.prepare(sr, blockSize);
-    drumEngine.prepare(sr, blockSize);
-    instruments.prepare(sr, blockSize);
+    eq.prepare(sr, maxBlockSize);
+    saturator.prepare(sr, maxBlockSize);
+    compressor.prepare(sr, maxBlockSize);
+    imager.prepare(sr, maxBlockSize);
+    delay.prepare(sr, maxBlockSize);
+    reverb.prepare(sr, maxBlockSize);
+    limiter.prepare(sr, maxBlockSize);
+    drumEngine.prepare(sr, maxBlockSize);
+    instruments.prepare(sr, maxBlockSize);
 
     fftIn.assign(kFftSize, 0.0f);
     fftWork.assign(kFftSize * 2, 0.0f);
@@ -221,7 +221,7 @@ void MixAgentAudioProcessor::prepareToPlay(double sr, int blockSize)
     runRvb = !skipModules.contains("rvb");
     runLim = !skipModules.contains("lim");
 
-    synthSlice = juce::jmax(1, blockSize);
+    synthSlice = juce::jmax(1, maxBlockSize);
     synthBus.setSize(2, synthSlice, false, false, true);
     uiNoteFifo.reset();
 }

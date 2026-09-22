@@ -62,6 +62,31 @@ target_link_libraries(MixAgentSmokeTest PRIVATE
     juce::juce_gui_extra
     juce::juce_audio_devices)
 
+juce_add_console_app(MixAgentAuditTest)
+juce_generate_juce_header(MixAgentAuditTest)
+target_sources(MixAgentAuditTest PRIVATE
+    Tests/AuditTest.cpp
+    ${AGM_SOURCES})
+target_compile_features(MixAgentAuditTest PRIVATE cxx_std_17)
+target_compile_definitions(MixAgentAuditTest PRIVATE JUCE_MODAL_LOOPS_PERMITTED=1)
+target_link_libraries(MixAgentAuditTest PRIVATE
+    juce::juce_audio_basics
+    juce::juce_audio_processors
+    juce::juce_audio_utils
+    juce::juce_dsp
+    juce::juce_gui_basics
+    juce::juce_gui_extra
+    juce::juce_audio_devices)
+
+juce_add_console_app(MixAgentCharacterTest)
+juce_generate_juce_header(MixAgentCharacterTest)
+target_sources(MixAgentCharacterTest PRIVATE Tests/CharacterTest.cpp)
+target_compile_features(MixAgentCharacterTest PRIVATE cxx_std_17)
+target_link_libraries(MixAgentCharacterTest PRIVATE
+    juce::juce_audio_basics
+    juce::juce_audio_processors
+    juce::juce_dsp)
+
 juce_add_console_app(EditorProbe)
 juce_generate_juce_header(EditorProbe)
 target_sources(EditorProbe PRIVATE
@@ -81,13 +106,15 @@ target_link_libraries(EditorProbe PRIVATE
     juce::juce_audio_devices)
 
 if(MIXAGENT_SANITIZE AND NOT MSVC)
-    foreach(t MixAgentSmokeTest EditorProbe)
+    foreach(t MixAgentSmokeTest MixAgentAuditTest MixAgentCharacterTest EditorProbe)
         target_compile_options(${t} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${t} PRIVATE -fsanitize=address,undefined)
     endforeach()
 endif()
 
 add_test(NAME MixAgentSmokeTest COMMAND MixAgentSmokeTest)
+add_test(NAME MixAgentAuditTest COMMAND MixAgentAuditTest)
+add_test(NAME MixAgentCharacterTest COMMAND MixAgentCharacterTest)
 
 # The editor probe needs a display; on Linux run it under xvfb-run when available.
 find_program(MIXAGENT_XVFB_RUN xvfb-run)
