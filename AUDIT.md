@@ -402,6 +402,48 @@ Attack knob's units are then approximate rather than exact.
 `mid` but round differently. Measured worst L−R difference: **-145.9 dBc**. Not audible; noted
 so nobody re-discovers it.
 
+### N10 — Three parameters have no control on the editor. `Source/PluginEditor.cpp`
+
+`in_gain`, `out_gain` and `drum_level` are ordinary automatable parameters with no knob, label
+or field anywhere on the UI — reachable only from the host's generic parameter list. The input
+and output *meters* are in the top bar; the trims that feed them are not.
+
+Proof (`EditorProbe`, new check):
+
+```
+  no control for in_gain
+  no control for out_gain
+```
+
+(`drum_level` was found by `grep -n "drum_level" Source/PluginEditor.cpp` returning nothing.)
+
+**FIXED.** IN and OUT sit beside their meters, DRUMS beside the instrument LEVEL knob.
+42 knobs → 45, and `EditorProbe` now asserts that every continuous parameter has one.
+
+### N11 — Ten knobs could only ever print "0" or "1". `Source/PluginEditor.cpp:100-137`
+
+Ten controls with a 0..1 range (`sat_drive`, `sat_mix`, `comp_mix`, `dly_feedback`, `dly_mix`,
+`dly_damp`, `dly_width`, `rvb_damp`, `rvb_width`, `rvb_mix`) were created with
+`addKnob(..., "", 0)`, i.e. no unit and zero decimal places, and `Knob::paint` drew
+`getTextFromValue(getValue())` — which is `String(value, 0)`. Half the range reads "0" and half
+reads "1". The eight frequency knobs printed a bare number with no unit, and `img_width`
+printed a bare 0..200 with no percent sign.
+
+**FIXED.** `Knob` takes a display scale and decimal count that affect the readout only: the
+0..1 controls read 0–100 %, frequencies say Hz, `img_width` and `rvb_size` say %.
+`EditorProbe` asserts every knob's readout differs at 25, 50 and 75 % of its range.
+
+### N12 — Opening the editor reset every parameter. `Source/PluginEditor.cpp:28`
+
+`juce::ComboBox::setSelectedId` notifies **asynchronously** by default, so the constructor's
+`presetCombo.setSelectedId(1)` fired `presetCombo.onChange → proc.setCurrentProgram(0)` a few
+milliseconds after the window opened. Harmless while preset 0 wrote nothing; a state-wipe once
+M6 made a preset restore every default. Caught by `EditorProbe` within the same wave.
+
+**FIXED.** All three of the editor's own initial `setSelectedId` calls pass
+`dontSendNotification`, and `EditorProbe` now constructs the editor, runs the message loop and
+asserts that not one parameter moved.
+
 ---
 
 ## COSMETIC
@@ -531,6 +573,9 @@ still name targets that exist (`MixAgent_VST3`, `MixAgent_Standalone`, `EditorPr
 | N7 | MINOR | Undocumented always-on delay wobble | DOCUMENTED + asserted (1.55–13.5 cents) |
 | N8 | MINOR | Compressor attack ~2× the knob | LEFT OPEN — the RMS branch is the feature |
 | N9 | MINOR | Width 0 mono fold differs by rounding | LEFT OPEN — −145.9 dBc |
+| N10 | MINOR | `in_gain`, `out_gain`, `drum_level` have no control on the editor | FIXED — 42 → 45 knobs |
+| N11 | MINOR | Ten knobs could only print "0" or "1"; no units | FIXED — percentages, Hz, % |
+| N12 | MAJOR | Opening the editor reset every parameter | FIXED — caught by EditorProbe |
 
 Test counts: 151 → 151 (`MixAgentSmokeTest`), 0 → 10 (`MixAgentAuditTest`),
-0 → 42 (`MixAgentCharacterTest`), 9 → 9 (`EditorProbe`). 151 → 212 checks in total.
+0 → 42 (`MixAgentCharacterTest`), 9 → 13 (`EditorProbe`). **160 → 216 checks** in total.

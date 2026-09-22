@@ -100,6 +100,27 @@ that proves it, marked FIXED with an after-measurement or LEFT OPEN with a reaso
 - **Dead code**: `Saturation::processChunk`'s `shapingOff` parameter (always `false`, re-tested
   on every oversampled sample) and `InstrumentBank::preparedBlock` are gone.
 
+### Editor
+
+- **Three parameters had no control at all.** `in_gain`, `out_gain` and `drum_level` were
+  reachable only through host automation: the input and output *meters* were in the top bar,
+  the trims that feed them were not. IN and OUT now sit beside their meters, DRUMS beside the
+  instrument LEVEL knob. 42 knobs → 45, and `EditorProbe` asserts that every continuous
+  parameter has one.
+- **Ten knobs could only ever print "0" or "1".** Every 0..1 control (`sat_drive`, `sat_mix`,
+  `comp_mix`, `dly_feedback`, `dly_mix`, `dly_damp`, `dly_width`, `rvb_damp`, `rvb_width`,
+  `rvb_mix`) was drawn with zero decimal places, so `String(value, 0)` printed "0" for the
+  bottom half of the range and "1" for the top. They read 0–100 % now. The eight frequency
+  knobs printed a bare number and now say Hz; `img_width` and `rvb_size` say %. `EditorProbe`
+  asserts every knob's readout differs at 25, 50 and 75 % of its range.
+- **Opening the editor used to reset every parameter** once presets began restoring defaults.
+  `juce::ComboBox::setSelectedId` notifies asynchronously by default, so the constructor's
+  `presetCombo.setSelectedId(1)` fired `setCurrentProgram(0)` a few milliseconds after the
+  window appeared. All three of the editor's own initial selections pass
+  `dontSendNotification` now, and `EditorProbe` constructs the editor, runs the message loop
+  and asserts that not one parameter moved. This was caught by the probe inside the same wave.
+- `EditorProbe`: 9 → 13 checks.
+
 ### Measured and deliberately NOT changed
 
 - **Reverb diffusers.** The four "allpasses" are not allpasses: `out = 0.75·d − 0.5·x` against
