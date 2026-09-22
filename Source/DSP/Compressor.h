@@ -20,6 +20,8 @@ public:
         rmsSq = 0.0f;
         mixSmooth = mixTarget;
         mkSmooth = makeupDb;
+        thrSmooth = thresholdDb;
+        slopeSmooth = slopeFor(ratio);
         smoothedGrDb.store(0.0f, std::memory_order_relaxed);
         bypass.prepare(sr);
     }
@@ -30,6 +32,8 @@ public:
         rmsSq = 0.0f;
         mixSmooth = mixTarget;
         mkSmooth = makeupDb;
+        thrSmooth = thresholdDb;
+        slopeSmooth = slopeFor(ratio);
         smoothedGrDb.store(0.0f, std::memory_order_relaxed);
         bypass.prepare(sr);
     }
@@ -44,11 +48,11 @@ public:
         float* ch0 = buffer.getWritePointer(0);
         float* ch1 = numChannels > 1 ? buffer.getWritePointer(1) : nullptr;
 
-        const float tDb = thresholdDb;
+        const float tDbTarget = thresholdDb;
         const float k = kneeDb;
         const float halfK = k * 0.5f;
         const float invTwoK = k > 0.0f ? 1.0f / (2.0f * k) : 0.0f;
-        const float slopeFactor = 1.0f - 1.0f / ratio;
+        const float slopeTarget = slopeFor(ratio);
         const float atk = attackCoef;
         const float rel = releaseCoef;
         const float rmsC = rmsCoef;
@@ -61,6 +65,8 @@ public:
         float env = envDb;
         float rms = rmsSq;
         float mk = mkSmooth;
+        float thrS = thrSmooth;
+        float slopeS = slopeSmooth;
         float mixS = mixSmooth;
         float grMeter = smoothedGrDb.load(std::memory_order_relaxed);
 
@@ -93,23 +99,32 @@ public:
 
             env += (levelDb > env ? atk : rel) * (levelDb - env);
 
-            const float over = env - tDb;
+            // Threshold and ratio are smoothed like everything else in here: they
+            // are automation targets, and stepping them steps the gain.
+            thrS += mkC * (tDbTarget - thrS);
+            slopeS += mkC * (slopeTarget - slopeS);
+
+            const float over = env - thrS;
             float gr = 0.0f;
             if (over > halfK)
-                gr = over * slopeFactor;
+                gr = over * slopeS;
             else if (k > 0.0f && over > -halfK)
             {
                 const float x = over + halfK;
-                gr = slopeFactor * x * x * invTwoK;
+                gr = slopeS * x * x * invTwoK;
             }
 
             mk += mkC * (mkT - mk);
 
-            float wetGain = dbToGain(mk - gr);
-            if (!(wetGain < 1.0f))
-                wetGain = 1.0f;
-            if (!(wetGain >= 0.0f))
-                wetGain = 0.0f;
+            // Gain reduction is clamped to "never boosts"; make-up gain is a
+            // separate factor, so the two cannot cancel each other out. Folding
+            // them into one value is what made the Makeup knob inert.
+            float grGain = dbToGain(-gr);
+            if (!(grGain <= 1.0f))
+                grGain = 1.0f;
+            if (!(grGain >= 0.0f))
+                grGain = 0.0f;
+            const float wetGain = grGain * dbToGain(mk);
 
             grMeter += grC * (gr - grMeter);
 
@@ -125,6 +140,8 @@ public:
         envDb = std::isfinite(env) ? env : -120.0f;
         rmsSq = std::isfinite(rms) ? rms : 0.0f;
         mkSmooth = std::isfinite(mk) ? mk : mkT;
+        thrSmooth = std::isfinite(thrS) ? thrS : tDbTarget;
+        slopeSmooth = std::isfinite(slopeS) ? slopeS : slopeTarget;
         mixSmooth = std::isfinite(mixS) ? mixS : mixT;
         smoothedGrDb.store(std::isfinite(grMeter) ? grMeter : 0.0f, std::memory_order_relaxed);
     }
@@ -141,6 +158,8 @@ public:
     float getGainReductionDb() const { return smoothedGrDb.load(std::memory_order_relaxed); }
 
 private:
+    static float slopeFor(float r) { return 1.0f - 1.0f / (r > 1.0f ? r : 1.0f); }
+
     void updateCoefs()
     {
         const double fs = sr > 0.0 ? sr : 44100.0;
@@ -173,6 +192,8 @@ private:
     float rmsSq = 0.0f;
     float mixSmooth = 1.0f;
     float mkSmooth = 0.0f;
+    float thrSmooth = -12.0f;
+    float slopeSmooth = 0.75f;
     std::atomic<float> smoothedGrDb{ 0.0f };
 
     SmoothBypass bypass;

@@ -148,7 +148,7 @@ void MixAgentAudioProcessor::handleParameter(const juce::String& id, float rawVa
     else if (id == "comp_makeup") { compressor.setMakeupDb(rawValue); }
     else if (id == "comp_mix") { compressor.setMix(rawValue); }
     else if (id == "img_enabled") { imager.setEnabled(rawValue > 0.5f); }
-    else if (id == "img_width") { imager.setWidth(rawValue); }
+    else if (id == "img_width") { imager.setWidthPercent(rawValue); }
     else if (id == "img_balance") { imager.setBalance(rawValue); }
     else if (id == "img_mono") { imager.setMono(rawValue > 0.5f); }
     else if (id == "dly_enabled") { delay.setEnabled(rawValue > 0.5f); }
@@ -377,7 +377,10 @@ void MixAgentAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     }
     renderSynthBus(buffer, numCh, rendered, numSamples - rendered);
 
-    const float gainCoef = 1.0f - std::exp(-(float)numSamples / (0.010f * (float)sampleRate));
+    // Per-SAMPLE step for a 10 ms ramp. This used to divide by the block length
+    // instead of by one sample and was then applied once per sample, so the ramp
+    // ran roughly blockSize times too fast and gain automation stepped.
+    const float gainCoef = 1.0f - std::exp(-1.0f / (0.010f * (float)sampleRate));
     const float inTarget = agm::dbToGain(inGainDb);
     const float outTarget = agm::dbToGain(outGainDb);
 
@@ -609,9 +612,18 @@ void MixAgentAudioProcessor::setCurrentProgram(int index)
         if (auto* p = dynamic_cast<juce::RangedAudioParameter*>(apvts.getParameter(id)))
             p->setValueNotifyingHost(p->getNormalisableRange().convertTo0to1(raw));
     };
+
+    // Start from the factory defaults every time. Each preset below only writes
+    // the parameters it cares about, so without this a preset was really
+    // "whatever was loaded before, plus these few changes" - and preset 0 (Init)
+    // was a no-op that reset nothing at all.
+    for (auto* param : getParameters())
+        if (auto* rp = dynamic_cast<juce::RangedAudioParameter*>(param))
+            rp->setValueNotifyingHost(rp->getDefaultValue());
+
     switch (currentProgram)
     {
-    case 0: break;
+    case 0: break;   // Init = the factory defaults restored above
     case 1:
         setRaw("eq_enabled", 1.0f); setRaw("eq_hp_enabled", 1.0f); setRaw("eq_hp_freq", 30.0f);
         setRaw("eq_hsf_freq", 10000.0f); setRaw("eq_hsf_gain", 1.5f);

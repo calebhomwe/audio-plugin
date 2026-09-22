@@ -772,7 +772,7 @@ static void imagerSuite()
         agm::StereoImager im;
         im.prepare(sr, 512);
         im.setEnabled(true);
-        im.setWidth(widthKnob);
+        im.setWidthPercent(widthKnob);
         im.setBalance(0.0f);
         im.setMono(false);
         AudioBuffer<float> buf(2, 512);
@@ -827,7 +827,7 @@ static void imagerSuite()
         agm::StereoImager im;
         im.prepare(sr, 512);
         im.setEnabled(true);
-        im.setWidth(0.0f);
+        im.setWidthPercent(0.0f);
         im.setBalance(0.0f);
         AudioBuffer<float> buf(2, 512);
         for (int b = 0; b < 40; ++b)
