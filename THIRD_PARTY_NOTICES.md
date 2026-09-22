@@ -17,8 +17,9 @@ a binary. If you instead want to ship a closed-source build, you need a paid
 JUCE licence from the JUCE authors, and this project's own licence would have to
 change too — an AGPLv3 project cannot be relicensed by a downstream user.
 
-JUCE is fetched at build time (see the repository's CMake configuration for the
-pinned version); its own licence text ships in the JUCE checkout as `LICENSE.md`.
+JUCE is not vendored in this repository: `CMakeLists.txt` fetches it at configure
+time with `FetchContent`, pinned to tag `8.0.9`. Its own licence text ships in the
+fetched checkout as `LICENSE.md`.
 
 ## Steinberg VST 3 SDK
 
