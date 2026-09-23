@@ -186,6 +186,10 @@ private:
     static constexpr float invSqrt2 = 0.70710678f;
     static constexpr float monoCombScale = 0.5f * invSqrt2;     // 0.5 * sqrt(8/16)
     static constexpr float stereoCombScale = invSqrt2;          // 1.0 * sqrt(4/8)
+    // Both are written out for numCombs == 16. Change the line count and they have
+    // to be recomputed as 0.5 * sqrt(8/numCombs) and sqrt(4/(numCombs/2)), so fail
+    // the build rather than quietly shift the whole wet level.
+    static_assert(numCombs == 16, "recompute monoCombScale and stereoCombScale");
 
     static float clamp(float v, float lo, float hi)
     {
