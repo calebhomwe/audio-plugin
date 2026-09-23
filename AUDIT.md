@@ -279,6 +279,9 @@ saved parameters rather than the preset.
 
 ### M7 — Notes 35–49 are stolen from the instrument on every MIDI channel. `Source/PluginProcessor.cpp:282`
 
+> **STILL OPEN after wave 4, with better evidence.** No plugin state stores a note number; what
+> does is the host's MIDI clips, which the plugin cannot migrate. See "Wave 4".
+
 ```cpp
 auto isDrumNote = [drumChannel](int n) { return drumChannel || (n >= 35 && n <= 49); };
 ```
@@ -305,6 +308,11 @@ the repo did not have at all, plus `CHANGELOG.md` and this file.
 
 ### N1 — The reverb's diffusion allpasses are not allpasses. `Source/DSP/Reverb.h:242`
 
+> **SUPERSEDED — this finding is wrong.** The sections *are* unity-gain allpasses; measured
+> ripple 0.000 dB. The algebra below reads the two coefficients against each other and misses
+> that the delayed value is read before the write. See "Wave 4" for the measurement. The text
+> is kept as written so the correction can be checked against it.
+
 ```cpp
 dl.buf[idx] = in + 0.5f * out;
 return 0.75f * out - 0.5f * in;
@@ -323,7 +331,7 @@ Measured effect on the late field (damping 0, decay 2 s, size 0.7, wet only):
 ```
 
 So the audible consequence is 3.2 dB of tilt, not the 4.4 dB ripple the coefficients alone
-suggest — the eight combs dominate.
+suggest — the comb bank dominates. (The bank was eight lines at the time; it is sixteen now.)
 
 **LEFT OPEN, and the attempt is the reason.** Rebuilding the four sections as proper
 unity-gain Schroeder allpasses (`out = −g·x + d`, `buf = x + g·d`, `g = 0.5`) and re-trimming
@@ -346,6 +354,9 @@ re-tested on every oversampled sample (`for (int i = 0; i < osNum && !shapingOff
 gone from both classes.
 
 ### N4 — Reverb pre-delay is applied *after* the tank. `Source/DSP/Reverb.h:285,308`
+
+> **FIXED in wave 4**, and the reason recorded below for leaving it open is wrong: the tank is
+> LTI, so the move is sonically null for static settings (null test −118.1 dBc). See "Wave 4".
 
 Pre-delay conventionally sets the gap between the dry sound and the first reflection. Here it
 delays the whole wet signal, tail included, which sounds the same for a steady input but
@@ -386,6 +397,9 @@ undocumented and not switchable, not because it is wrong. **Now documented** in 
 with these numbers, and asserted in `Tests/CharacterTest.cpp` so it cannot grow unnoticed.
 
 ### N8 — Compressor attack is about twice the knob value. `Source/DSP/Compressor.h:80-88`
+
+> **FIXED in wave 4** by calibrating the knob against the detector rather than changing the
+> detector. See "Wave 4".
 
 The detector takes `max(peak, 1.414 × sqrt(RMS))` with an 8 ms RMS window, and that window
 slows the level rise:

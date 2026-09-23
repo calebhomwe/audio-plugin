@@ -722,9 +722,10 @@ static void delaySuite()
 }
 
 // ===========================================================================
-// REVERB - Schroeder tank: 8 damped comb filters into 4 diffusion allpasses.
-// Measured: diffuser flatness (a real allpass has NO magnitude ripple),
-// and stereo decorrelation.
+// REVERB - Schroeder tank: 16 damped comb filters (8 per stereo half, mutually
+// prime, log-spaced over a 1:1.95 range) into 4 unity-gain diffusion allpasses.
+// Measured: late-field flatness, stereo decorrelation, and the pre-delay's
+// position - onset, tail length, and what the knob does to a ringing tail.
 // ===========================================================================
 static void reverbSuite()
 {
