@@ -1,0 +1,62 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      JUCE_TAG: 8.0.9
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libasound2-dev libx11-dev libxrandr-dev libxinerama-dev \
+            libxcursor-dev libxext-dev libxcomposite-dev libfreetype-dev libfontconfig1-dev \
+            libcurl4-openssl-dev libgtk-3-dev mesa-common-dev libglu1-mesa-dev xvfb
+
+      - name: Cache JUCE
+        id: juce-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/../JUCE
+          key: juce-${{ env.JUCE_TAG }}
+
+      - name: Fetch JUCE ${{ env.JUCE_TAG }}
+        if: steps.juce-cache.outputs.cache-hit != 'true'
+        run: git clone --depth 1 --branch "$JUCE_TAG" https://github.com/juce-framework/JUCE.git "$GITHUB_WORKSPACE/../JUCE"
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DFETCHCONTENT_SOURCE_DIR_JUCE="$GITHUB_WORKSPACE/../JUCE" \
+            -DMIXAGENT_COPY_PLUGIN=OFF -DCMAKE_CXX_FLAGS="-Wall -Wextra"
+
+      - name: Build tests + VST3
+        run: |
+          cmake --build build --target MixAgentSmokeTest MixAgentAuditTest \
+            MixAgentCharacterTest EditorProbe MixAgent_VST3
+
+      - name: Tests (ctest)
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Editor probe (xvfb)
+        run: xvfb-run -a ./build/EditorProbe_artefacts/Release/EditorProbe
+
+      # The stricter set is applied to the project's OWN sources only: JUCE's
+      # headers come in through -isystem so the build is not judged on them, and
+      # nothing is compiled twice - this is a syntax-only pass.
+      - name: Strict warnings on our own sources
+        run: |
+          FLAGS=$(ninja -C build -t commands MixAgentSmokeTest | grep -m1 'PluginProcessor.cpp.o' \
+                    | sed 's|^/usr/bin/c++ ||; s| -o .*||; s| -MD .*||; s|-I\([^ ]*\)|-isystem \1|g')
+          STRICT="-Wall -Wextra -Wshadow -Wnon-virtual-dtor -Woverloaded-virtual -Wunused -Werror"
+          for f in Source/PluginProcessor.cpp Source/PluginEditor.cpp \
+                   Tests/SmokeTest.cpp Tests/AuditTest.cpp Tests/CharacterTest.cpp \
+                   Tests/EditorProbe.cpp; do
+            echo "== $f"
+            /usr/bin/c++ $FLAGS $STRICT -I"$PWD" -fsyntax-only "$f"
+          done

@@ -20,7 +20,12 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
 
     for (int i = 0; i < proc.getNumPrograms(); ++i)
         presetCombo.addItem(proc.getProgramName(i), i + 1);
-    presetCombo.setSelectedId(1);
+    // dontSendNotification: ComboBox::setSelectedId notifies ASYNCHRONOUSLY by
+    // default, so this fired presetCombo.onChange -> setCurrentProgram(0) a few
+    // milliseconds after the editor opened. Now that selecting a preset resets
+    // every parameter to its default, that would wipe the user's settings just
+    // for opening the window.
+    presetCombo.setSelectedId(1, juce::dontSendNotification);
     presetCombo.setColour(juce::ComboBox::backgroundColourId, juce::Colour(0xff0a0a0d));
     presetCombo.setColour(juce::ComboBox::textColourId, agm::ui::kAccentHot);
     presetCombo.setColour(juce::ComboBox::arrowColourId, agm::ui::kTextDim);
@@ -74,32 +79,32 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
     };
     auto pctText = [](double v) { return juce::String(juce::roundToInt(v * 100.0)) + "%"; };
 
-    hpKnob = addKnob("eq_hp_freq", "HP", "", 0);
+    hpKnob = addKnob("eq_hp_freq", "HP", " Hz", 0);
     hpKnob->textFromValueFunction = hzText;
-    lpKnob = addKnob("eq_lp_freq", "LP", "", 0);
+    lpKnob = addKnob("eq_lp_freq", "LP", " Hz", 0);
     lpKnob->textFromValueFunction = hzText;
-    lsfF = addKnob("eq_lsf_freq", "LS F", "", 0);
+    lsfF = addKnob("eq_lsf_freq", "LS F", " Hz", 0);
     lsfF->textFromValueFunction = hzText;
     lsfG = addKnob("eq_lsf_gain", "LS G", " dB", 1);
-    hsfF = addKnob("eq_hsf_freq", "HS F", "", 0);
+    hsfF = addKnob("eq_hsf_freq", "HS F", " Hz", 0);
     hsfF->textFromValueFunction = hzText;
     hsfG = addKnob("eq_hsf_gain", "HS G", " dB", 1);
-    p1F = addKnob("eq_p1_freq", "P1 F", "", 0);
+    p1F = addKnob("eq_p1_freq", "P1 F", " Hz", 0);
     p1F->textFromValueFunction = hzText;
     p1G = addKnob("eq_p1_gain", "P1 G", " dB", 1);
     p1Q = addKnob("eq_p1_q", "P1 Q", "", 2);
-    p2F = addKnob("eq_p2_freq", "P2 F", "", 0);
+    p2F = addKnob("eq_p2_freq", "P2 F", " Hz", 0);
     p2F->textFromValueFunction = hzText;
     p2G = addKnob("eq_p2_gain", "P2 G", " dB", 1);
     p2Q = addKnob("eq_p2_q", "P2 Q", "", 2);
-    p3F = addKnob("eq_p3_freq", "P3 F", "", 0);
+    p3F = addKnob("eq_p3_freq", "P3 F", " Hz", 0);
     p3F->textFromValueFunction = hzText;
     p3G = addKnob("eq_p3_gain", "P3 G", " dB", 1);
     p3Q = addKnob("eq_p3_q", "P3 Q", "", 2);
 
-    satDrive = addKnob("sat_drive", "DRIVE", "", 0);
+    satDrive = addKnob("sat_drive", "DRIVE", " %", 0, 100.0f);
     satDrive->textFromValueFunction = pctText;
-    satMix = addKnob("sat_mix", "MIX", "", 0);
+    satMix = addKnob("sat_mix", "MIX", " %", 0, 100.0f);
     satMix->textFromValueFunction = pctText;
     satOut = addKnob("sat_out", "OUT", " dB", 1);
 
@@ -108,31 +113,31 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
     compA = addKnob("comp_attack", "ATTACK", " ms", 0);
     compRel = addKnob("comp_release", "RELEASE", " ms", 0);
     compK = addKnob("comp_knee", "KNEE", " dB", 0);
-    compMix = addKnob("comp_mix", "MIX", "", 0);
+    compMix = addKnob("comp_mix", "MIX", " %", 0, 100.0f);
     compMix->textFromValueFunction = pctText;
     compMake = addKnob("comp_makeup", "MAKEUP", " dB", 0);
 
-    imgW = addKnob("img_width", "WIDTH", "", 0);
+    imgW = addKnob("img_width", "WIDTH", " %", 0);
     imgW->textFromValueFunction = [](double v) { return juce::String(juce::roundToInt(v)) + "%"; };
     imgB = addKnob("img_balance", "BAL", "", 2);
 
     dlyT = addKnob("dly_time", "TIME", " ms", 0);
-    dlyF = addKnob("dly_feedback", "FEEDBACK", "", 0);
+    dlyF = addKnob("dly_feedback", "FEEDBACK", " %", 0, 100.0f);
     dlyF->textFromValueFunction = pctText;
-    dlyM = addKnob("dly_mix", "MIX", "", 0);
+    dlyM = addKnob("dly_mix", "MIX", " %", 0, 100.0f);
     dlyM->textFromValueFunction = pctText;
-    dlyD = addKnob("dly_damp", "DAMP", "", 0);
+    dlyD = addKnob("dly_damp", "DAMP", " %", 0, 100.0f);
     dlyD->textFromValueFunction = pctText;
-    dlyW = addKnob("dly_width", "WIDTH", "", 0);
+    dlyW = addKnob("dly_width", "WIDTH", " %", 0, 100.0f);
     dlyW->textFromValueFunction = pctText;
 
-    rvbS = addKnob("rvb_size", "SIZE", "", 2);
+    rvbS = addKnob("rvb_size", "SIZE", " %", 0, 100.0f);
     rvbDc = addKnob("rvb_decay", "DECAY", " s", 1);
-    rvbD = addKnob("rvb_damp", "DAMP", "", 0);
+    rvbD = addKnob("rvb_damp", "DAMP", " %", 0, 100.0f);
     rvbD->textFromValueFunction = pctText;
-    rvbW = addKnob("rvb_width", "WIDTH", "", 0);
+    rvbW = addKnob("rvb_width", "WIDTH", " %", 0, 100.0f);
     rvbW->textFromValueFunction = pctText;
-    rvbM = addKnob("rvb_mix", "MIX", "", 0);
+    rvbM = addKnob("rvb_mix", "MIX", " %", 0, 100.0f);
     rvbM->textFromValueFunction = pctText;
     rvbP = addKnob("rvb_predelay", "PRE-DELAY", " ms", 0);
 
@@ -148,7 +153,7 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
 
      for (int i = 0; i < (int)agm::InstrumentBank::kCount; ++i)
         instProgramCombo.addItem(agm::InstrumentBank::programName(i), i + 1);
-    instProgramCombo.setSelectedId(1);
+    instProgramCombo.setSelectedId(1, juce::dontSendNotification);
     instProgramCombo.setColour(juce::ComboBox::backgroundColourId, juce::Colour(0xff0a0a0d));
     instProgramCombo.setColour(juce::ComboBox::textColourId, agm::ui::kAccentHot);
     instProgramCombo.setColour(juce::ComboBox::arrowColourId, agm::ui::kTextDim);
@@ -170,7 +175,7 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
     instFilterCombo.addItem("FAVORITES", 2);
     instFilterCombo.addItem("KEYS/LEAD", 3);
     instFilterCombo.addItem("BASS", 4);
-    instFilterCombo.setSelectedId(1);
+    instFilterCombo.setSelectedId(1, juce::dontSendNotification);
     instFilterCombo.setColour(juce::ComboBox::backgroundColourId, juce::Colour(0xff0a0a0d));
     instFilterCombo.setColour(juce::ComboBox::textColourId, agm::ui::kAccentHot);
     instFilterCombo.setColour(juce::ComboBox::arrowColourId, agm::ui::kTextDim);
@@ -182,7 +187,15 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
     favToggle.onClick = [this] { onClickFav(); };
     addAndMakeVisible(favToggle);
 
+    // in_gain and out_gain were parameters with no control anywhere on the
+    // editor either: the meters were there, the trims were not.
+    inTrim = addKnob("in_gain", "IN", " dB", 1);
+    outTrim = addKnob("out_gain", "OUT", " dB", 1);
+
     instLevel = addKnob("inst_level", "LEVEL", " dB", 1);
+    // drum_level was a fully working parameter with no control anywhere on the
+    // editor: reachable only through host automation.
+    drumLevel = addKnob("drum_level", "DRUMS", " dB", 1);
 
     // chromatic preview keyboard (one octave, triggers instruments via UI queue)
     std::vector<agm::ui::PadGrid::Pad> keys;
@@ -198,14 +211,20 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
 }
 
 agm::ui::Knob* MixAgentAudioProcessorEditor::addKnob(const juce::String& id, const juce::String& label,
-                                                     const juce::String& suffix, int decimals)
+                                                     const juce::String& suffix, int decimals,
+                                                     float displayScale)
 {
-    auto* knob = knobs.add(new agm::ui::Knob(label, suffix));
+    auto* knob = knobs.add(new agm::ui::Knob(label, suffix, displayScale, decimals));
     knob->setNumDecimalPlacesToDisplay(decimals);
     if (auto* p = dynamic_cast<juce::RangedAudioParameter*>(proc.getAPVTS().getParameter(id)))
     {
         knob->setRange(p->getNormalisableRange().start, p->getNormalisableRange().end, p->getNormalisableRange().interval);
-        knob->setDoubleClickReturnValue(true, p->getDefaultValue());
+        // getDefaultValue() is normalised, so it has to be converted. This call
+        // is belt-and-braces: juce::SliderParameterAttachment sets the same value
+        // a line later, which is why double-click-to-default was already correct.
+        // EditorProbe asserts it, so a future change to either cannot break it
+        // silently.
+        knob->setDoubleClickReturnValue(true, p->getNormalisableRange().convertFrom0to1(p->getDefaultValue()));
         knobAttachments.add(new juce::AudioProcessorValueTreeState::SliderAttachment(proc.getAPVTS(), id, *knob));
     }
     addAndMakeVisible(knob);
@@ -276,7 +295,7 @@ void MixAgentAudioProcessorEditor::drawHeader(juce::Graphics& g, juce::Rectangle
     g.setColour(agm::ui::kTextDim);
     g.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
     g.drawText(name, r.getX() + 10, r.getY() + 3, r.getWidth() - 20, 20, juce::Justification::centredLeft);
-    const float w = (float)g.getCurrentFont().getStringWidth(name);
+    const float w = juce::GlyphArrangement::getStringWidth(g.getCurrentFont(), name);
     const float ux = (float)(r.getX() + 10);
     const float uy = (float)(r.getY() + 24);
     g.setGradientFill(juce::ColourGradient(agm::ui::kAccent, ux, uy,
@@ -348,7 +367,7 @@ void MixAgentAudioProcessorEditor::paint(juce::Graphics& g)
         g.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
         g.drawText(name, drumRect.getX() + 34, drumRect.getY() + 3, drumRect.getWidth() - 44, 20,
                    juce::Justification::centredLeft);
-        const float w = (float)g.getCurrentFont().getStringWidth(name);
+        const float w = juce::GlyphArrangement::getStringWidth(g.getCurrentFont(), name);
         const float ux = (float)(drumRect.getX() + 34);
         const float uy = (float)(drumRect.getY() + 24);
         g.setGradientFill(juce::ColourGradient(agm::ui::kAccent, ux, uy,
@@ -386,9 +405,11 @@ void MixAgentAudioProcessorEditor::resized()
 
     presetCombo.setBounds(t.removeFromRight(170).withSizeKeepingCentre(170, 26));
     t.removeFromRight(16);
+    outTrim->setBounds(t.removeFromRight(50).withSizeKeepingCentre(50, 42).withY(topBarRect.getY() + 1));
     outLabel.setBounds(t.removeFromRight(30).withSizeKeepingCentre(30, 12));
     outMeter.setBounds(t.removeFromRight(14).withSizeKeepingCentre(14, 36));
     t.removeFromRight(10);
+    inTrim->setBounds(t.removeFromRight(50).withSizeKeepingCentre(50, 42).withY(topBarRect.getY() + 1));
     inLabel.setBounds(t.removeFromRight(30).withSizeKeepingCentre(30, 12));
     inMeter.setBounds(t.removeFromRight(14).withSizeKeepingCentre(14, 36));
 
@@ -468,7 +489,8 @@ void MixAgentAudioProcessorEditor::resized()
     instFilterCombo.setBounds(drumRow.getX() + 326, drumRow.getY() + 4, 76, 22);
     favToggle.setBounds(drumRow.getX() + 408, drumRow.getY() + 2, 58, 26);
     instLevel->setBounds(drumRow.getX() + 474, drumRow.getY() + 2, 54, 64);
-    padLabel.setBounds(drumRow.getX() + 538, drumRow.getY() + 7, drumRow.getWidth() - 548, 16);
+    drumLevel->setBounds(drumRow.getX() + 530, drumRow.getY() + 2, 54, 64);
+    padLabel.setBounds(drumRow.getX() + 594, drumRow.getY() + 7, drumRow.getWidth() - 604, 16);
     padGrid.setBounds(drumRow.withTrimmedTop(72).reduced(8, 6));
 }
 

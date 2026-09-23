@@ -73,9 +73,14 @@ public:
         bypass.setEnabled(on);
     }
 
-    void setWidth(float width)
+    // The parameter and the UI are both a percentage: 0 % is a mono sum, 100 %
+    // leaves the image exactly as it came in, 200 % doubles the side signal.
+    // Taking the percentage straight as a 0..2 side-gain multiplier - which is
+    // what this used to do - made 100 % mean 200 % and saturated the control at
+    // 2 %.
+    void setWidthPercent(float percent)
     {
-        widthTarget = juce::jlimit(0.0f, 2.0f, sanitize(width, 1.0f));
+        widthTarget = juce::jlimit(0.0f, 2.0f, 0.01f * sanitize(percent, 100.0f));
         widthSmooth.setTarget(widthTarget);
     }
 

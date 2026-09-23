@@ -3,6 +3,7 @@
 #include <cmath>
 #include <array>
 #include <algorithm>
+#include <atomic>
 
 namespace agm {
 
@@ -45,7 +46,7 @@ public:
     void prepare(double sampleRate, int blockSize)
     {
         sr = sampleRate > 1.0 ? sampleRate : 44100.0;
-        preparedBlock = juce::jmax(blockSize, 1);
+        scratch.setSize(2, juce::jmax(blockSize, 1), false, false, true);
         reset();
     }
 
@@ -54,22 +55,49 @@ public:
         for (auto& v : voices) v = Voice {};
         voiceAge = 0;
         randState = 0x1234u;
-        setProgram(currentProgram);
+        sustainPedal = false;
+        bendSemitones = 0.0f;
+        bendMult = 1.0f;
+        syncProgram();
     }
 
-    void setProgram(int p)
-    {
-        currentProgram = juce::jlimit(0, (int)kCount - 1, p);
-        recipe = makeRecipe((Program)currentProgram);
-    }
+    // Message-thread safe: only the index is written here; the audio thread
+    // rebuilds the recipe from it (see syncProgram) so a note-on can never
+    // observe a half-written recipe.
+    void setProgram(int p) { pendingProgram.store(juce::jlimit(0, (int)kCount - 1, p), std::memory_order_relaxed); }
 
-    int getProgram() const { return currentProgram; }
+    int getProgram() const { return pendingProgram.load(std::memory_order_relaxed); }
 
     void setLevelDb(float db) { levelDb = db; }
     void setEnabled(bool on) { enabled = on; if (!on) allNotesOff(); }
 
+    // Pitch bend in semitones (host range is applied by the caller; +/-2 by default).
+    void setPitchBend(float semitones)
+    {
+        bendSemitones = juce::jlimit(-24.0f, 24.0f, semitones);
+        bendMult = std::exp2(bendSemitones / 12.0f);
+    }
+
+    float getPitchBend() const { return bendSemitones; }
+
+    // CC64: while down, note-offs are deferred until the pedal is lifted.
+    void setSustain(bool down)
+    {
+        sustainPedal = down;
+        if (down) return;
+        for (auto& v : voices)
+            if (v.active && v.held)
+            {
+                v.held = false;
+                startRelease(v, v.recipe.releaseRate);
+            }
+    }
+
+    bool isSustainDown() const { return sustainPedal; }
+
     void noteOn(int note, float velocity)
     {
+        syncProgram();
         const int n = juce::jlimit(0, 127, note);
         const float vel = juce::jlimit(0.0f, 1.0f, velocity);
         Voice* target = nullptr;
@@ -77,6 +105,16 @@ public:
             if (v.active && v.note == n && v.envStage != EnvStage::Release && v.envStage != EnvStage::Off)
             { target = &v; break; }
         Voice& v = (target != nullptr) ? *target : voiceFor();
+
+        // Retrigger / steal without a pop: the amplitude envelope restarts from
+        // the level the voice is currently at, and oscillator phases and filter
+        // memories carry over, so the output stays continuous at the boundary.
+        const float carryEnv = v.active ? v.envLevel : 0.0f;
+        const auto carryPhase = v.oscPhase;
+        const auto carryPhaseR = v.oscPhaseR;
+        const float carryMod = v.modPhase;
+        const float carryF = v.filterState, carryFR = v.filterStateR;
+
         v = Voice {};
         v.active = true;
         v.note = n;
@@ -84,9 +122,14 @@ public:
         v.age = ++voiceAge;
         v.freq = noteToFreq(n);
         v.envStage = EnvStage::Attack;
-        v.envLevel = 0.0f;
+        v.envLevel = carryEnv;
         v.envRate = 0.0f;
         v.filterEnvLevel = 1.0f;
+        v.oscPhase = carryPhase;
+        v.oscPhaseR = carryPhaseR;
+        v.modPhase = carryMod;
+        v.filterState = carryF;
+        v.filterStateR = carryFR;
         v.recipe = recipe;
         for (int i = 0; i < recipe.nOsc && i < 4; ++i)
             v.detune[i] = (float)((rand01() - 0.5) * 2.0) * recipe.detune;
@@ -98,19 +141,26 @@ public:
         for (auto& v : voices)
             if (v.active && v.note == n && v.envStage != EnvStage::Release && v.envStage != EnvStage::Off)
             {
-                v.envStage = EnvStage::Release;
-                v.envRate = v.recipe.releaseRate;
+                if (sustainPedal) { v.held = true; continue; }
+                startRelease(v, v.recipe.releaseRate);
             }
     }
 
+    // CC123: fast release on everything (click-free "panic").
     void allNotesOff()
     {
         for (auto& v : voices)
             if (v.active && v.envStage != EnvStage::Off)
             {
-                v.envStage = EnvStage::Release;
-                v.envRate = v.recipe.releaseRate * 4.0f;
+                v.held = false;
+                startRelease(v, v.recipe.releaseRate * 4.0f);
             }
+    }
+
+    // CC120: immediate silence.
+    void allSoundOff()
+    {
+        for (auto& v : voices) v = Voice {};
     }
 
     bool isActive() const
@@ -119,26 +169,46 @@ public:
         return false;
     }
 
+    int getActiveVoiceCount() const
+    {
+        int n = 0;
+        for (auto& v : voices) if (v.active && v.envStage != EnvStage::Off) ++n;
+        return n;
+    }
+
+    static constexpr int kVoices = 24;
+
     void renderAdd(juce::AudioBuffer<float>& b, int numChannels)
     {
+        renderAdd(b, numChannels, 0, b.getNumSamples());
+    }
+
+    // Renders [start, start+num) of the buffer. Allocation-free: work is done in
+    // slices no longer than the scratch buffer sized in prepare().
+    void renderAdd(juce::AudioBuffer<float>& b, int numChannels, int start, int num)
+    {
         if (!enabled) return;
-        const int num = b.getNumSamples();
-        if (num <= 0 || numChannels <= 0) return;
-        if (scratch.getNumSamples() < num)
-            scratch.setSize(juce::jmax(2, numChannels), num, false, false, true);
+        syncProgram();
+        numChannels = juce::jmin(numChannels, b.getNumChannels());
+        if (num <= 0 || numChannels <= 0 || scratch.getNumSamples() <= 0) return;
+        const int slice = scratch.getNumSamples();
         const float outGain = juce::Decibels::decibelsToGain(levelDb) * 0.5f;
 
-        for (auto& v : voices)
+        for (int pos = 0; pos < num; pos += slice)
         {
-            if (!v.active || v.envStage == EnvStage::Off) continue;
+            const int n = juce::jmin(slice, num - pos);
             float* const outL = scratch.getWritePointer(0);
             float* const outR = scratch.getWritePointer(1);
-            renderVoice(v, num, outL, outR);
-            for (int ch = 0; ch < numChannels; ++ch)
+            for (auto& v : voices)
             {
-                float* dst = b.getWritePointer(ch);
-                const float* src = (ch & 1) ? outR : outL;
-                for (int i = 0; i < num; ++i) dst[i] += src[i] * outGain;
+                if (!v.active || v.envStage == EnvStage::Off) continue;
+                renderVoice(v, n, outL, outR);
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    float* dst = b.getWritePointer(ch) + start + pos;
+                    const float* src = (ch & 1) ? outR : outL;
+                    for (int i = 0; i < n; ++i) dst[i] += src[i] * outGain;
+                }
             }
         }
     }
@@ -169,6 +239,7 @@ private:
     struct Voice
     {
         bool active = false;
+        bool held = false;        // note-off received while the sustain pedal was down
         int note = 60;
         float vel = 1.0f;
         float freq = 440.0f;
@@ -186,19 +257,52 @@ private:
         float filterCoef = 0.0f;
         Recipe recipe {};
         uint32_t age = 0;
+        int releaseSamples = 0;
+        int releaseCapSamples = 0;
+        float releaseFade = 1.0f;
+        float releaseFadeStep = 0.0f;
     };
 
-    static constexpr int kVoices = 24;
     std::array<Voice, kVoices> voices {};
     uint32_t voiceAge = 0;
     Recipe recipe {};
     int currentProgram = (int)Pluck;
+    std::atomic<int> pendingProgram { (int)Pluck };
+    bool sustainPedal = false;
+    float bendSemitones = 0.0f;
+    float bendMult = 1.0f;
     double sr = 44100.0;
-    int preparedBlock = 1;
     float levelDb = 0.0f;
     bool enabled = true;
     juce::AudioBuffer<float> scratch;
     uint32_t randState = 0x1234u;
+
+    static constexpr float kSilentLevel = 1.585e-5f;   // -96 dB
+
+    void startRelease(Voice& v, float rate)
+    {
+        v.envStage = EnvStage::Release;
+        v.envRate = rate;
+        const double releaseSec = rate > 0.0f ? 1.0 / (double)rate : 0.0;
+        v.releaseSamples = 0;
+        v.releaseCapSamples = (int)(std::max(3.0 * releaseSec, 2.0) * sr);
+        const double fadeSec = juce::jlimit(0.05, 1.0, 0.5 * releaseSec);
+        v.releaseFadeStep = (float)(1.0 / (fadeSec * sr));
+        v.releaseFade = 1.0f;
+    }
+
+    void syncProgram()
+    {
+        const int p = pendingProgram.load(std::memory_order_relaxed);
+        if (p != currentProgram || !recipeValid)
+        {
+            currentProgram = p;
+            recipe = makeRecipe((Program)currentProgram);
+            recipeValid = true;
+        }
+    }
+
+    bool recipeValid = false;
 
     float rand01()
     {
@@ -229,12 +333,31 @@ private:
         return *best;
     }
 
-    static float sawWave(float ph)
+    // Band-limited sawtooth. A naive 2*phase-1 ramp has a discontinuity every
+    // cycle, and all the harmonics above Nyquist that implies fold straight back
+    // down into the audible band - at C7 that was audible as loud partials BELOW
+    // the note's own fundamental. PolyBLEP subtracts a two-sample polynomial
+    // approximation of the band-limited step at the wrap, which removes most of
+    // it for the cost of two comparisons (Valimaki/Huovilainen, "Antialiasing
+    // Oscillators in Subtractive Synthesis").
+    static float sawWave(float ph, float inc)
     {
         float x = ph;
         if (x >= 1.0f) x = std::fmod(x, 1.0f);
         if (x < 0.0f) x += 1.0f;
-        return 2.0f * x - 1.0f;
+        float y = 2.0f * x - 1.0f;
+        const float dt = inc > 1.0e-7f ? inc : 1.0e-7f;
+        if (x < dt)
+        {
+            const float t = x / dt - 1.0f;
+            y -= -t * t;
+        }
+        else if (x > 1.0f - dt)
+        {
+            const float t = (x - 1.0f) / dt + 1.0f;
+            y -= t * t;
+        }
+        return y;
     }
 
     static float ratePerSecToCoef(float ratePerSec, double sampleRate)
@@ -340,6 +463,63 @@ private:
             r.gain = 0.9f;
             r.octaveShift = -1.0f;
             break;
+        case DarkBell:
+            r.nOsc = 1; r.saw = false; r.fm = true;
+            r.modRatio = 2.0f; r.modAmount = 2.5f;
+            r.attackRate = 1.0f / 0.002f;
+            r.decayRate = 1.0f / 2.2f;
+            r.sustainLevel = 0.0f;
+            r.releaseRate = 1.0f / 1.0f;
+            r.filterBase = 0.25f; r.filterEnv = 0.0f;
+            r.gain = 0.7f;
+            break;
+        case GlassPluck:
+            r.nOsc = 1; r.saw = false; r.fm = true;
+            r.modRatio = 7.0f; r.modAmount = 1.5f;
+            r.attackRate = 1.0f / 0.001f;
+            r.decayRate = 1.0f / 0.6f;
+            r.sustainLevel = 0.0f;
+            r.releaseRate = 1.0f / 0.3f;
+            r.gain = 0.7f;
+            break;
+        case VoxChoir:
+            r.nOsc = 4; r.saw = true; r.detune = 9.0f;
+            r.attackRate = 1.0f / 0.25f;
+            r.decayRate = 1.0f / 0.8f;
+            r.sustainLevel = 0.9f;
+            r.releaseRate = 1.0f / 0.6f;
+            r.filterBase = 0.18f; r.filterEnv = 0.15f; r.filterDecay = 1.0f / 0.5f;
+            r.gain = 0.45f;
+            break;
+        case SoftSoul:
+            r.nOsc = 2; r.saw = true; r.detune = 3.0f;
+            r.attackRate = 1.0f / 0.008f;
+            r.decayRate = 1.0f / 1.4f;
+            r.sustainLevel = 0.5f;
+            r.releaseRate = 1.0f / 0.45f;
+            r.filterBase = 0.22f; r.filterEnv = 0.35f; r.filterDecay = 1.0f / 0.5f;
+            r.gain = 0.55f;
+            break;
+        case BounceKeys:
+            r.nOsc = 2; r.saw = true; r.detune = 5.0f;
+            r.attackRate = 1.0f / 0.002f;
+            r.decayRate = 1.0f / 0.35f;
+            r.sustainLevel = 0.4f;
+            r.releaseRate = 1.0f / 0.18f;
+            r.filterBase = 0.3f; r.filterEnv = 0.6f; r.filterDecay = 1.0f / 0.15f;
+            r.gain = 0.6f;
+            break;
+        case RageLead:
+            r.nOsc = 4; r.saw = true; r.detune = 18.0f;
+            r.attackRate = 1.0f / 0.003f;
+            r.decayRate = 1.0f / 0.25f;
+            r.sustainLevel = 0.95f;
+            r.releaseRate = 1.0f / 0.2f;
+            r.filterBase = 0.85f; r.filterEnv = 0.1f; r.filterDecay = 1.0f / 0.2f;
+            r.gain = 0.45f;
+            break;
+        default:
+            break;
         }
         return r;
     }
@@ -347,7 +527,7 @@ private:
     void renderVoice(Voice& v, int num, float* outL, float* outR)
     {
         const Recipe& r = v.recipe;
-        const float fundamental = v.freq * std::pow(2.0f, r.octaveShift);
+        const float fundamental = v.freq * std::pow(2.0f, r.octaveShift) * bendMult;
         const float phaseInc = fundamental / (float)sr;
         const float modInc = phaseInc * r.modRatio;
         const float aCoef = ratePerSecToCoef(r.attackRate, sr);
@@ -398,9 +578,20 @@ private:
                 v.envLevel = r.sustainLevel;
                 break;
             case EnvStage::Release:
+            {
                 v.envLevel += relCoef * (0.0f - v.envLevel);
-                if (v.envLevel < 0.0005f) { v.envLevel = 0.0f; v.envStage = EnvStage::Off; v.active = false; }
+                // Free the voice at -96 dB, or fade it out once it has been releasing for
+                // max(3 x release, 2 s): an exponential tail would otherwise hog the
+                // voice for ~11 time constants (Pad: 11 s) while inaudible.
+                ++v.releaseSamples;
+                if (v.releaseSamples > v.releaseCapSamples)
+                {
+                    v.releaseFade -= v.releaseFadeStep;
+                    if (v.releaseFade <= 0.0f) { v.releaseFade = 0.0f; v.envLevel = 0.0f; }
+                }
+                if (v.envLevel < kSilentLevel) { v.envLevel = 0.0f; v.envStage = EnvStage::Off; v.active = false; }
                 break;
+            }
             default: break;
             }
 
@@ -437,8 +628,8 @@ private:
                     if (v.oscPhase[o] >= 1.0f) v.oscPhase[o] -= 1.0f;
                     v.oscPhaseR[o] += incR[o];
                     if (v.oscPhaseR[o] >= 1.0f) v.oscPhaseR[o] -= 1.0f;
-                    sL += sawWave(v.oscPhase[o]) * inv;
-                    sR += sawWave(v.oscPhaseR[o]) * inv;
+                    sL += sawWave(v.oscPhase[o], incL[o]) * inv;
+                    sR += sawWave(v.oscPhaseR[o], incR[o]) * inv;
                 }
             }
             else if (r.organ)
@@ -468,7 +659,7 @@ private:
                 sR = v.filterStateR;
             }
 
-            const float amp = v.envLevel * velEff * r.gain;
+            const float amp = v.envLevel * v.releaseFade * velEff * r.gain;
             outL[i] = sL * amp;
             outR[i] = sR * amp;
         }

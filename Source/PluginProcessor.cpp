@@ -20,6 +20,7 @@ MixAgentAudioProcessor::MixAgentAudioProcessor()
 
 MixAgentAudioProcessor::~MixAgentAudioProcessor()
 {
+    cancelPendingUpdate();
     for (auto* param : getParameters())
         if (auto* rp = dynamic_cast<juce::RangedAudioParameter*>(param))
             apvts.removeParameterListener(rp->paramID, this);
@@ -147,22 +148,22 @@ void MixAgentAudioProcessor::handleParameter(const juce::String& id, float rawVa
     else if (id == "comp_makeup") { compressor.setMakeupDb(rawValue); }
     else if (id == "comp_mix") { compressor.setMix(rawValue); }
     else if (id == "img_enabled") { imager.setEnabled(rawValue > 0.5f); }
-    else if (id == "img_width") { imager.setWidth(rawValue); }
+    else if (id == "img_width") { imager.setWidthPercent(rawValue); }
     else if (id == "img_balance") { imager.setBalance(rawValue); }
     else if (id == "img_mono") { imager.setMono(rawValue > 0.5f); }
-    else if (id == "dly_enabled") { delay.setEnabled(rawValue > 0.5f); }
-    else if (id == "dly_time") { delay.setTimeMs(rawValue); }
-    else if (id == "dly_feedback") { delay.setFeedback(rawValue); }
+    else if (id == "dly_enabled") { delay.setEnabled(rawValue > 0.5f); dlyOn.store(rawValue > 0.5f); }
+    else if (id == "dly_time") { delay.setTimeMs(rawValue); dlyTimeMs.store(rawValue); }
+    else if (id == "dly_feedback") { delay.setFeedback(rawValue); dlyFeedback.store(rawValue); }
     else if (id == "dly_mix") { delay.setMix(rawValue); }
     else if (id == "dly_damp") { delay.setDamping(rawValue); }
     else if (id == "dly_width") { delay.setWidth(rawValue); }
-    else if (id == "rvb_enabled") { reverb.setEnabled(rawValue > 0.5f); }
+    else if (id == "rvb_enabled") { reverb.setEnabled(rawValue > 0.5f); rvbOn.store(rawValue > 0.5f); }
     else if (id == "rvb_size") { reverb.setSize(rawValue); }
-    else if (id == "rvb_decay") { reverb.setDecaySec(rawValue); }
+    else if (id == "rvb_decay") { reverb.setDecaySec(rawValue); rvbDecaySec.store(rawValue); }
     else if (id == "rvb_damp") { reverb.setDamping(rawValue); }
     else if (id == "rvb_width") { reverb.setWidth(rawValue); }
     else if (id == "rvb_mix") { reverb.setMix(rawValue); }
-    else if (id == "rvb_predelay") { reverb.setPreDelayMs(rawValue); }
+    else if (id == "rvb_predelay") { reverb.setPreDelayMs(rawValue); rvbPreDelayMs.store(rawValue); }
     else if (id == "lim_enabled") { limiter.setEnabled(rawValue > 0.5f); }
     else if (id == "lim_ceiling") { limiter.setCeilingDb(rawValue); }
     else if (id == "lim_attack") { limiter.setAttackMs(rawValue); }
@@ -180,18 +181,18 @@ void MixAgentAudioProcessor::syncModules()
             handleParameter(rp->paramID, rp->getNormalisableRange().convertFrom0to1(rp->getValue()));
 }
 
-void MixAgentAudioProcessor::prepareToPlay(double sr, int blockSize)
+void MixAgentAudioProcessor::prepareToPlay(double sr, int maxBlockSize)
 {
     sampleRate = sr;
-    eq.prepare(sr, blockSize);
-    saturator.prepare(sr, blockSize);
-    compressor.prepare(sr, blockSize);
-    imager.prepare(sr, blockSize);
-    delay.prepare(sr, blockSize);
-    reverb.prepare(sr, blockSize);
-    limiter.prepare(sr, blockSize);
-    drumEngine.prepare(sr, blockSize);
-    instruments.prepare(sr, blockSize);
+    eq.prepare(sr, maxBlockSize);
+    saturator.prepare(sr, maxBlockSize);
+    compressor.prepare(sr, maxBlockSize);
+    imager.prepare(sr, maxBlockSize);
+    delay.prepare(sr, maxBlockSize);
+    reverb.prepare(sr, maxBlockSize);
+    limiter.prepare(sr, maxBlockSize);
+    drumEngine.prepare(sr, maxBlockSize);
+    instruments.prepare(sr, maxBlockSize);
 
     fftIn.assign(kFftSize, 0.0f);
     fftWork.assign(kFftSize * 2, 0.0f);
@@ -212,20 +213,174 @@ void MixAgentAudioProcessor::prepareToPlay(double sr, int blockSize)
     setLatencySamples(limiter.getLatencySamples() + saturator.getLatencySamples());
     skipModules.clear();
     skipModules.addTokens(juce::SystemStats::getEnvironmentVariable("AGM_SKIP", ""), " ", "");
+    runEq = !skipModules.contains("eq");
+    runSat = !skipModules.contains("sat");
+    runComp = !skipModules.contains("comp");
+    runImg = !skipModules.contains("img");
+    runDly = !skipModules.contains("dly");
+    runRvb = !skipModules.contains("rvb");
+    runLim = !skipModules.contains("lim");
+
+    synthSlice = juce::jmax(1, maxBlockSize);
+    synthBus.setSize(2, synthSlice, false, false, true);
+    uiNoteFifo.reset();
 }
 
 void MixAgentAudioProcessor::releaseResources() {}
 
+// A host uses this to decide how long to keep calling processBlock after the
+// transport stops. A fixed 5 s under-reported badly: measured with an impulse,
+// the tail of a 2 s delay at 0.95 feedback is still above -60 dB after 68 s.
+double MixAgentAudioProcessor::getTailLengthSeconds() const
+{
+    // Reverb: Decay is the low-frequency RT60 within 15 % (measured), plus the
+    // pre-delay, plus margin for the 4 diffusers.
+    double tail = 1.0;
+    if (rvbOn.load())
+        tail = std::max(tail, 1.25 * (double)rvbDecaySec.load()
+                              + 0.001 * (double)rvbPreDelayMs.load() + 0.3);
+
+    // Delay: n repeats to reach -60 dB is ln(1000) / -ln(feedback).
+    if (dlyOn.load())
+    {
+        const double g = juce::jlimit(0.0, 0.999, (double)dlyFeedback.load());
+        const double t = 0.001 * (double)dlyTimeMs.load();
+        const double repeats = g > 1.0e-3 ? 6.908 / -std::log(g) : 1.0;
+        // Cap at kMaxReportedTail: at high feedback the honest figure runs to
+        // minutes (2 s at 0.95 is ~270 s of -60 dB decay in theory, 68 s
+        // measured with the damping filter in the loop), and no host will render
+        // that. The delay does reach exact zero - its denormal guard sees to it.
+        tail = std::max(tail, std::min(t * repeats + t, kMaxReportedTail));
+    }
+
+    // The drum voices fade out by 3.5 s at the latest and the instrument voices
+    // by 6 s, so the floor covers a released chord even with no FX engaged.
+    return std::max(tail, 6.0);
+}
+
 void MixAgentAudioProcessor::uiNoteOn(int note, float velocity)
 {
-    const juce::ScopedLock sl(uiNoteLock);
-    uiNotes.addEvent(juce::MidiMessage::noteOn(1, note, velocity), 0);
+    int start1, size1, start2, size2;
+    uiNoteFifo.prepareToWrite(1, start1, size1, start2, size2);
+    if (size1 > 0)
+    {
+        uiNoteSlots[(size_t)start1] = { note, velocity, true };
+        uiNoteFifo.finishedWrite(1);
+    }
 }
 
 void MixAgentAudioProcessor::uiNoteOff(int note)
 {
-    const juce::ScopedLock sl(uiNoteLock);
-    uiNotes.addEvent(juce::MidiMessage::noteOff(1, note), 0);
+    int start1, size1, start2, size2;
+    uiNoteFifo.prepareToWrite(1, start1, size1, start2, size2);
+    if (size1 > 0)
+    {
+        uiNoteSlots[(size_t)start1] = { note, 0.0f, false };
+        uiNoteFifo.finishedWrite(1);
+    }
+}
+
+void MixAgentAudioProcessor::drainUiNotes()
+{
+    const int ready = uiNoteFifo.getNumReady();
+    if (ready <= 0)
+        return;
+    int start1, size1, start2, size2;
+    uiNoteFifo.prepareToRead(ready, start1, size1, start2, size2);
+    auto apply = [this](int start, int size)
+    {
+        for (int i = 0; i < size; ++i)
+        {
+            // The pad grid is the instrument's preview keyboard (C3-B3 = 48-59):
+            // it must never hit the legacy 35-49 drum range.
+            const auto& e = uiNoteSlots[(size_t)(start + i)];
+            if (e.on) instruments.noteOn(e.note, e.velocity);
+            else instruments.noteOff(e.note, 0.0f);
+        }
+    };
+    apply(start1, size1);
+    apply(start2, size2);
+    uiNoteFifo.finishedRead(size1 + size2);
+}
+
+// Drums: everything on MIDI channel 10 (GM convention, makes the whole GM map
+// reachable) plus, for compatibility with earlier sessions, notes 35-49 on any
+// channel. UI pads never come through here (they always play the instrument).
+void MixAgentAudioProcessor::handleMidiEvent(const juce::MidiMessage& msg)
+{
+    const bool drumChannel = msg.getChannel() == 10;
+    auto isDrumNote = [drumChannel](int n) { return drumChannel || (n >= 35 && n <= 49); };
+    if (msg.isNoteOn())
+    {
+        const int note = msg.getNoteNumber();
+        if (isDrumNote(note)) drumEngine.noteOn(note, msg.getFloatVelocity());
+        else instruments.noteOn(note, msg.getFloatVelocity());
+    }
+    else if (msg.isNoteOff())
+    {
+        const int note = msg.getNoteNumber();
+        if (isDrumNote(note)) drumEngine.noteOff(note, 0.0f);
+        else instruments.noteOff(note, 0.0f);
+    }
+    else if (msg.isProgramChange())
+    {
+        // Applied to the bank right here (sample-accurate); the inst_program
+        // parameter is brought in line on the message thread.
+        const int pc = msg.getProgramChangeNumber();
+        if (pc >= 0 && pc < (int)agm::InstrumentBank::kCount && !drumChannel)
+        {
+            instruments.setProgram(pc);
+            midiProgramChange.store(pc, std::memory_order_relaxed);
+            triggerAsyncUpdate();
+        }
+    }
+    else if (msg.isPitchWheel())
+    {
+        const float norm = (float)(msg.getPitchWheelValue() - 8192) / 8192.0f;
+        instruments.setPitchBend(norm * kPitchBendRangeSemitones);
+    }
+    else if (msg.isSustainPedalOn())
+    {
+        instruments.setSustain(true);
+    }
+    else if (msg.isSustainPedalOff())
+    {
+        instruments.setSustain(false);
+    }
+    else if (msg.isAllNotesOff())
+    {
+        instruments.setSustain(false);
+        instruments.allNotesOff();
+    }
+    else if (msg.isAllSoundOff())
+    {
+        instruments.setSustain(false);
+        instruments.allSoundOff();
+        drumEngine.allNotesOff();
+    }
+}
+
+// Instruments + drums are summed on their own bus, soft-limited so a 24-voice
+// pile-up cannot hard-clip into the FX chain, then added to the host signal.
+void MixAgentAudioProcessor::renderSynthBus(juce::AudioBuffer<float>& buffer, int numCh, int start, int num)
+{
+    if (num <= 0 || synthBus.getNumSamples() <= 0)
+        return;
+    const int busCh = juce::jmin(2, numCh);
+    for (int pos = 0; pos < num; pos += synthSlice)
+    {
+        const int n = juce::jmin(synthSlice, num - pos);
+        synthBus.clear(0, n);
+        instruments.renderAdd(synthBus, busCh, 0, n);
+        drumEngine.renderAdd(synthBus, busCh, 0, n);
+        for (int ch = 0; ch < numCh; ++ch)
+        {
+            float* dst = buffer.getWritePointer(ch) + start + pos;
+            const float* src = synthBus.getReadPointer(juce::jmin(ch, busCh - 1));
+            for (int i = 0; i < n; ++i)
+                dst[i] += agm::softClipBus(src[i]);
+        }
+    }
 }
 
 void MixAgentAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
@@ -236,46 +391,26 @@ void MixAgentAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     if (numSamples == 0 || numCh == 0)
         return;
 
-    // instruments/drums render first: instrument bus feeds the FX chain
-    auto isDrumNote = [](int n) { return n >= 35 && n <= 49; };
+    // Instruments/drums render first (the instrument bus feeds the FX chain),
+    // with MIDI applied at each event's sample offset inside the block.
+    drainUiNotes();
+    int rendered = 0;
     for (const auto metadata : midiMessages)
     {
-        const auto msg = metadata.getMessage();
-        const int note = msg.getNoteNumber();
-        if (msg.isNoteOn())
+        const int at = juce::jlimit(0, numSamples, metadata.samplePosition);
+        if (at > rendered)
         {
-            if (isDrumNote(note)) drumEngine.noteOn(note, msg.getFloatVelocity());
-            else instruments.noteOn(note, msg.getFloatVelocity());
+            renderSynthBus(buffer, numCh, rendered, at - rendered);
+            rendered = at;
         }
-        else if (msg.isNoteOff())
-        {
-            if (isDrumNote(note)) drumEngine.noteOff(note, 0.0f);
-            else instruments.noteOff(note, 0.0f);
-        }
+        handleMidiEvent(metadata.getMessage());
     }
-    {
-        const juce::ScopedLock sl(uiNoteLock);
-        for (const auto metadata : uiNotes)
-        {
-            const auto msg = metadata.getMessage();
-            const int note = msg.getNoteNumber();
-            if (msg.isNoteOn())
-            {
-                if (isDrumNote(note)) drumEngine.noteOn(note, msg.getFloatVelocity());
-                else instruments.noteOn(note, msg.getFloatVelocity());
-            }
-            else if (msg.isNoteOff())
-            {
-                if (isDrumNote(note)) drumEngine.noteOff(note, 0.0f);
-                else instruments.noteOff(note, 0.0f);
-            }
-        }
-        uiNotes.clear();
-    }
-    instruments.renderAdd(buffer, numCh);
-    drumEngine.renderAdd(buffer, numCh);
+    renderSynthBus(buffer, numCh, rendered, numSamples - rendered);
 
-    const float gainCoef = 1.0f - std::exp(-(float)numSamples / (0.010f * (float)sampleRate));
+    // Per-SAMPLE step for a 10 ms ramp. This used to divide by the block length
+    // instead of by one sample and was then applied once per sample, so the ramp
+    // ran roughly blockSize times too fast and gain automation stepped.
+    const float gainCoef = 1.0f - std::exp(-1.0f / (0.010f * (float)sampleRate));
     const float inTarget = agm::dbToGain(inGainDb);
     const float outTarget = agm::dbToGain(outGainDb);
 
@@ -297,13 +432,13 @@ void MixAgentAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
 
     pushAnalyser(buffer);
 
-    if (!skipModules.contains("eq")) eq.process(buffer);
-    if (!skipModules.contains("sat")) saturator.process(buffer);
-    if (!skipModules.contains("comp")) compressor.process(buffer);
-    if (!skipModules.contains("img")) imager.process(buffer);
-    if (!skipModules.contains("dly")) delay.process(buffer);
-    if (!skipModules.contains("rvb")) reverb.process(buffer);
-    if (!skipModules.contains("lim")) limiter.process(buffer);
+    if (runEq) eq.process(buffer);
+    if (runSat) saturator.process(buffer);
+    if (runComp) compressor.process(buffer);
+    if (runImg) imager.process(buffer);
+    if (runDly) delay.process(buffer);
+    if (runRvb) reverb.process(buffer);
+    if (runLim) limiter.process(buffer);
 
     float outL = 0.0f, outR = 0.0f;
     g = outGainSmoothed;
@@ -404,18 +539,34 @@ bool MixAgentAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) 
     return layouts.getMainOutputChannels() == 1 || layouts.getMainOutputChannels() == 2;
 }
 
+void MixAgentAudioProcessor::handleAsyncUpdate()
+{
+    const int pc = midiProgramChange.exchange(-1, std::memory_order_relaxed);
+    if (pc < 0)
+        return;
+    if (auto* p = dynamic_cast<juce::RangedAudioParameter*>(apvts.getParameter("inst_program")))
+        p->setValueNotifyingHost(p->getNormalisableRange().convertTo0to1((float)pc));
+}
+
 void MixAgentAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
     auto state = apvts.copyState();
     if (auto xml = state.createXml())
+    {
+        xml->setAttribute("hostProgram", currentProgram);
         copyXmlToBinary(*xml, destData);
+    }
 }
 
 void MixAgentAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
 {
     if (auto xml = getXmlFromBinary(data, sizeInBytes))
         if (xml->hasTagName(apvts.state.getType()))
+        {
+            // Older states carry no hostProgram attribute: keep preset 0 as before.
+            currentProgram = juce::jlimit(0, kPresetCount - 1, xml->getIntAttribute("hostProgram", 0));
             apvts.replaceState(juce::ValueTree::fromXml(*xml));
+        }
 }
 
 namespace
@@ -491,9 +642,18 @@ void MixAgentAudioProcessor::setCurrentProgram(int index)
         if (auto* p = dynamic_cast<juce::RangedAudioParameter*>(apvts.getParameter(id)))
             p->setValueNotifyingHost(p->getNormalisableRange().convertTo0to1(raw));
     };
+
+    // Start from the factory defaults every time. Each preset below only writes
+    // the parameters it cares about, so without this a preset was really
+    // "whatever was loaded before, plus these few changes" - and preset 0 (Init)
+    // was a no-op that reset nothing at all.
+    for (auto* param : getParameters())
+        if (auto* rp = dynamic_cast<juce::RangedAudioParameter*>(param))
+            rp->setValueNotifyingHost(rp->getDefaultValue());
+
     switch (currentProgram)
     {
-    case 0: break;
+    case 0: break;   // Init = the factory defaults restored above
     case 1:
         setRaw("eq_enabled", 1.0f); setRaw("eq_hp_enabled", 1.0f); setRaw("eq_hp_freq", 30.0f);
         setRaw("eq_hsf_freq", 10000.0f); setRaw("eq_hsf_gain", 1.5f);

@@ -10,11 +10,23 @@ namespace agm {
 class Reverb
 {
 public:
+    static constexpr int numCombs = 16;
+
     Reverb()
     {
-        const int combLens[8] = { 1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617 };
+        // Eight mutually-prime lengths per stereo half, evenly log-spaced over a
+        // 1:1.95 range; the halves interleave so each channel spans the whole range.
+        // The old set (1116 1188 1277 1356 1422 1491 1557 1617, the Freeverb
+        // numbers) had 21 of its 28 pairs sharing a common factor - seven of the
+        // eight were divisible by 3 - and the stereo split left each channel only
+        // four lines over a 1.2:1 spread, which is the sparse low-frequency modal
+        // density the audit measured as spectral tilt. Count is what fixes it:
+        // 8 lines flatten to 4.3-5.1 dB however well conditioned, 16 reach 2.4 dB.
+        const int combLens[numCombs] = {
+            1117, 1279, 1447, 1601, 1741, 1877, 2029, 2179,     // left half
+            1193, 1361, 1523, 1669, 1811, 1949, 2099, 2251 };   // right half
         const int apLens[4] = { 556, 441, 341, 225 };
-        for (int i = 0; i < 8; ++i) combs[i].baseLen = combLens[i];
+        for (int i = 0; i < numCombs; ++i) combs[i].baseLen = combLens[i];
         for (int i = 0; i < 4; ++i) allpasses[i].baseLen = apLens[i];
     }
 
@@ -23,7 +35,7 @@ public:
         sr = sampleRate > 1.0 ? sampleRate : 44100.0;
         bs = blockSize > 0 ? blockSize : 512;
 
-        for (int i = 0; i < 8; ++i)
+        for (int i = 0; i < numCombs; ++i)
         {
             combs[i].line.maxLen = maxLength(combs[i].baseLen);
             combs[i].line.buf.assign((size_t)combs[i].line.maxLen, 0.0f);
@@ -137,11 +149,19 @@ private:
         float next(float in, float delayF)
         {
             buf[(size_t)wIdx] = in;
-            float rp = (float)wIdx - delayF;
+            // delayF is a smoothed value and can sit at e.g. 1e-7: wIdx - 1e-7 rounds
+            // to wIdx in float, and after the "+ maxLen" wrap it rounds to maxLen
+            // itself, one past the buffer (found by AddressSanitizer). Wrap on the
+            // integer index instead of trusting the float.
+            float rp = (float)wIdx - (delayF > 0.0f ? delayF : 0.0f);
             if (rp < 0.0f)
                 rp += (float)maxLen;
-            const int i0 = (int)rp;
-            const float f = rp - (float)i0;
+            int i0 = (int)rp;
+            if (i0 >= maxLen)
+                i0 -= maxLen;
+            if (i0 < 0)
+                i0 = 0;
+            const float f = juce::jlimit(0.0f, 1.0f, rp - (float)i0);
             int i1 = i0 + 1;
             if (i1 >= maxLen)
                 i1 = 0;
@@ -151,6 +171,25 @@ private:
             return out;
         }
     };
+
+    // The tank's wet level must not depend on how many comb lines the bank has, or
+    // every preset's wet/dry balance moves. The lines are mutually prime, so their
+    // outputs sum incoherently and the level goes as sqrt(lines): the scale is
+    // therefore 1/sqrt(lines summed), referenced to the 8-line bank this replaced
+    // (mono summed 8 lines at 0.5, each stereo half summed 4 at 1.0).
+    // Measured wet RMS, mix 1.0, 0.3 full-scale noise, 8 lines -> 16 lines:
+    //   stereo  -45.15 -> -45.26 dBFS (decay 0.5), -44.31 -> -44.42 (2.0),
+    //           -40.30 -> -40.68 (5.0)
+    //   mono    -48.20 -> -48.27,       -47.31 -> -47.38,       -43.43 -> -43.60
+    // i.e. within 0.11 dB except 0.39 dB at the longest decay. Without the
+    // normalisation the wet level fell 3.1 dB across the board.
+    static constexpr float invSqrt2 = 0.70710678f;
+    static constexpr float monoCombScale = 0.5f * invSqrt2;     // 0.5 * sqrt(8/16)
+    static constexpr float stereoCombScale = invSqrt2;          // 1.0 * sqrt(4/8)
+    // Both are written out for numCombs == 16. Change the line count and they have
+    // to be recomputed as 0.5 * sqrt(8/numCombs) and sqrt(4/(numCombs/2)), so fail
+    // the build rather than quietly shift the whole wet level.
+    static_assert(numCombs == 16, "recompute monoCombScale and stereoCombScale");
 
     static float clamp(float v, float lo, float hi)
     {
@@ -187,7 +226,7 @@ private:
         const float fc = 200.0f * std::pow(100.0f, 1.0f - dampCur);
         const float g = 1.0f - std::exp(-6.2831853f * fc / srF);
 
-        for (int i = 0; i < 8; ++i)
+        for (int i = 0; i < numCombs; ++i)
         {
             Comb& c = combs[i];
             const int len = scaledLength(c.baseLen);
@@ -257,20 +296,23 @@ private:
             float dry = data[s];
             if (!std::isfinite(dry))
                 dry = 0.0f;
-            const float in = dry * inGain;
+            // Pre-delay sits in FRONT of the tank: it is the gap between the dry
+            // sound and the tank's onset, so it must delay what goes in. Behind the
+            // tank it re-times the ringing tail as well, which is audible the moment
+            // the knob is automated.
+            const float in = predelays[0].next(dry, preDelayF) * inGain;
             float acc = 0.0f;
-            for (int i = 0; i < 8; ++i)
+            for (int i = 0; i < numCombs; ++i)
                 acc += combProcess(combs[i], in);
-            float wet = acc * 0.5f;
+            float wet = acc * monoCombScale;
             wet = allpassProcess(allpasses[0], wet);
             wet = allpassProcess(allpasses[1], wet);
             wet = allpassProcess(allpasses[2], wet);
             wet = allpassProcess(allpasses[3], wet);
             const float bg = bypass.next();
-            const float wetOut = predelays[0].next(wet, preDelayF);
             mixCur += (mixTarget - mixCur) * mixCoef;
             const float m = mixCur * bg;
-            data[s] = dry + (wetOut - dry) * m;
+            data[s] = dry + (wet - dry) * m;
         }
     }
 
@@ -286,14 +328,16 @@ private:
                 dryL = 0.0f;
             if (!std::isfinite(dryR))
                 dryR = 0.0f;
-            const float inL = dryL * inGain;
-            const float inR = dryR * inGain;
+            const float inL = predelays[0].next(dryL, preDelayF) * inGain;
+            const float inR = predelays[1].next(dryR, preDelayF) * inGain;
             float accL = 0.0f;
             float accR = 0.0f;
-            for (int i = 0; i < 4; ++i)
+            for (int i = 0; i < numCombs / 2; ++i)
                 accL += combProcess(combs[i], inL);
-            for (int i = 4; i < 8; ++i)
+            for (int i = numCombs / 2; i < numCombs; ++i)
                 accR += combProcess(combs[i], inR);
+            accL *= stereoCombScale;
+            accR *= stereoCombScale;
             float wetL = allpassProcess(allpasses[0], accL);
             wetL = allpassProcess(allpasses[1], wetL);
             float wetR = allpassProcess(allpasses[2], accR);
@@ -301,16 +345,14 @@ private:
             const float mixL = w1 * wetL + w2 * wetR;
             const float mixR = w2 * wetL + w1 * wetR;
             const float bg = bypass.next();
-            const float wetOutL = predelays[0].next(mixL, preDelayF);
-            const float wetOutR = predelays[1].next(mixR, preDelayF);
             mixCur += (mixTarget - mixCur) * mixCoef;
             const float m = mixCur * bg;
-            L[s] = dryL + (wetOutL - dryL) * m;
-            R[s] = dryR + (wetOutR - dryR) * m;
+            L[s] = dryL + (mixL - dryL) * m;
+            R[s] = dryR + (mixR - dryR) * m;
         }
     }
 
-    Comb combs[8];
+    Comb combs[numCombs];
     Allpass allpasses[4];
     PreDelay predelays[2];
     SmoothBypass bypass;

@@ -46,11 +46,11 @@ inline void panelBevel(juce::Graphics& g, juce::Rectangle<float> r, float corner
 class PowerToggle : public juce::ToggleButton
 {
 public:
-    explicit PowerToggle(const juce::String& text = {})
+    explicit PowerToggle(const juce::String& label = {})
     {
-        setButtonText(text);
+        setButtonText(label);
         setClickingTogglesState(true);
-        setTooltip(text);
+        setTooltip(label);
     }
 
     void paint(juce::Graphics& g) override

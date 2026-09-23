@@ -10,7 +10,9 @@
 #include "DSP/DrumEngine.h"
 #include "DSP/InstrumentBank.h"
 
-class MixAgentAudioProcessor : public juce::AudioProcessor, public juce::AudioProcessorValueTreeState::Listener
+class MixAgentAudioProcessor : public juce::AudioProcessor,
+                               public juce::AudioProcessorValueTreeState::Listener,
+                               private juce::AsyncUpdater
 {
 public:
     MixAgentAudioProcessor();
@@ -27,7 +29,7 @@ public:
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 5.0; }
+    double getTailLengthSeconds() const override;
 
     int getNumPrograms() override { return kPresetCount; }
     int getCurrentProgram() override { return currentProgram; }
@@ -52,9 +54,14 @@ public:
     bool getInstrumentActive() const { return instruments.isActive(); }
     int getInstrumentProgram() const { return instruments.getProgram(); }
     void setInstrumentProgram(int p) { instruments.setProgram(p); }
+    int getInstrumentVoiceCount() const { return instruments.getActiveVoiceCount(); }
+    bool getDrumsActive() const { return drumEngine.isActive(); }
+    int getDrumVoiceCount() const { return drumEngine.getActiveVoiceCount(); }
+    static constexpr float kPitchBendRangeSemitones = 2.0f;
     bool isFavorite(int program) const;
     void setFavorite(int program, bool fav);
     int getFavoriteCount() const;
+    // Debug aid: AGM_SKIP="eq sat comp img dly rvb lim" (space separated) skips modules.
     juce::StringArray skipModules;
 
     // UI-driven triggers (message thread safe; drained on the audio thread)
@@ -80,17 +87,37 @@ private:
     agm::InstrumentBank instruments;
 
     float inGainDb = 0.0f, outGainDb = 0.0f;
+    // Cached for getTailLengthSeconds(), which the host may call from either
+    // thread; written only by handleParameter().
+    std::atomic<float> rvbDecaySec { 2.5f }, rvbPreDelayMs { 10.0f };
+    std::atomic<float> dlyTimeMs { 380.0f }, dlyFeedback { 0.45f };
+    std::atomic<bool> rvbOn { false }, dlyOn { false };
     float inGainSmoothed = 1.0f, outGainSmoothed = 1.0f;
     double sampleRate = 44100.0;
     int currentProgram = 0;
     static constexpr int kPresetCount = 12;
+    static constexpr double kMaxReportedTail = 30.0;
 
     std::atomic<float> inLevelL { 0.0f }, inLevelR { 0.0f };
     std::atomic<float> outLevelL { 0.0f }, outLevelR { 0.0f };
     float inPeakL = 0.0f, inPeakR = 0.0f, outPeakL = 0.0f, outPeakR = 0.0f;
 
-    juce::CriticalSection uiNoteLock;
-    juce::MidiBuffer uiNotes;
+    // UI -> audio thread note events. Single producer (message thread), single
+    // consumer (audio thread); lock-free so processBlock never blocks on the GUI.
+    struct UiNoteEvent { int note = 0; float velocity = 0.0f; bool on = false; };
+    static constexpr int kUiNoteFifoSize = 128;
+    juce::AbstractFifo uiNoteFifo { kUiNoteFifoSize };
+    std::array<UiNoteEvent, kUiNoteFifoSize> uiNoteSlots {};
+
+    void handleMidiEvent(const juce::MidiMessage& msg);
+    void handleAsyncUpdate() override;   // syncs a MIDI program change into the inst_program parameter
+    std::atomic<int> midiProgramChange { -1 };
+    void renderSynthBus(juce::AudioBuffer<float>& buffer, int numCh, int start, int num);
+    void drainUiNotes();
+
+    juce::AudioBuffer<float> synthBus;
+    int synthSlice = 0;
+    bool runEq = true, runSat = true, runComp = true, runImg = true, runDly = true, runRvb = true, runLim = true;
 
     static constexpr int kFftSize = 2048;
     static constexpr int kAnaBins = 600;

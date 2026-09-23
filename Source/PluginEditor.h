@@ -19,7 +19,8 @@ public:
 
 private:
     agm::ui::Knob* addKnob(const juce::String& id, const juce::String& label,
-                           const juce::String& suffix = {}, int decimals = 1);
+                           const juce::String& suffix = {}, int decimals = 1,
+                           float displayScale = 1.0f);
     juce::ToggleButton* addPower(const juce::String& id);
     juce::ToggleButton* addToggle(const juce::String& id, const juce::String& text);
     void placeKnobs(float centreX, int y, const juce::Array<agm::ui::Knob*>& ks, int w = 50, int h = 72);
@@ -47,6 +48,9 @@ private:
     juce::ComboBox instFilterCombo;
     juce::ToggleButton favToggle { "FAV" };
     agm::ui::Knob* instLevel = nullptr;
+    agm::ui::Knob* drumLevel = nullptr;
+    agm::ui::Knob* inTrim = nullptr;
+    agm::ui::Knob* outTrim = nullptr;
     juce::ToggleButton* instPower = nullptr;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> instProgramAttachment;
     int auditionTimerRemaining = 0;
