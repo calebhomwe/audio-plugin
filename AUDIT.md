@@ -574,6 +574,284 @@ still name targets that exist (`MixAgent_VST3`, `MixAgent_Standalone`, `EditorPr
 
 ---
 
+## Wave 4 — closing the items left open
+
+Four items were re-opened. Each began by reproducing the earlier number before anything was
+changed; two of those re-measurements turned up something the first pass had got wrong.
+
+### N4 (was LEFT OPEN) — reverb pre-delay after the tank. **NOW FIXED.**
+
+Reproduced: yes. Pre-delay was applied to the tank's output (`Reverb.h:278,312-313`).
+
+The reason recorded for leaving it open — "would change what every existing reverb setting
+sounds like" — is **wrong, and measurably so.** The tank is linear and time-invariant, so a
+delay commutes with it. Rendering the 4 s impulse response at pre-delay 40 ms (preset 4's
+value) before and after the move:
+
+```
+  response peak            : 0.0084374622
+  worst before/after diff  : 1.0491931e-08  = -118.11 dBc
+  bit-identical samples    : 159718 of 192000 (83.186 %)
+  RMS of the difference    : -112.96 dB below the response RMS
+```
+
+No preset's reverb sound moves. Onset and tail length are also unchanged, which is the same
+fact seen from the other side (48 kHz, decay 2 s, size 0.7, damp 0.5):
+
+```
+  pre-delay     onset before -> after            stereo RT60 before -> after
+      0 ms      848 sa / 17.67 ms -> 848 sa      1.479 -> 1.479 s
+     20 ms     1808 sa / 37.67 ms -> 1809 sa     1.479 -> 1.472 s
+     50 ms     3248 sa / 67.67 ms -> 3250 sa     1.479 -> 1.477 s
+    100 ms     5648 sa / 117.67 ms -> 5651 sa    1.479 -> 1.479 s
+```
+
+The onset lands at the pre-delay setting plus the tank's own 17.67 ms in both builds, to
+within the 1-2 samples the fractional read interpolates over.
+
+What the order **does** change is the knob under automation, and there the old arrangement was
+plainly wrong. Stepping pre-delay 0 -> 100 ms 1.07 s into a decaying tail, with the pre-delay
+behind the tank, slides a read pointer back over the wet history and re-plays the louder
+earlier part of the decay:
+
+```
+  worst tail-envelope change vs. the un-automated reference:  3.66 dB -> 0.00 dB
+  tail level rises above where it was when the knob moved  :  0.60 dB -> 0.00 dB
+```
+
+Asserted by three new checks in `Tests/CharacterTest.cpp`. The automation one fails against
+the pre-wave-4 code, so it is a guard and not a restatement.
+
+One theory tested and disproved: that a non-finite sample could survive in the pre-delay
+buffer for up to 250 ms after the comb bank had cleared itself. Feeding a single `Inf` with
+pre-delay at 200 ms produced **0 non-finite output samples of 102400** in both builds — the
+comb's own `clearTank()` runs before the wet signal reaches the pre-delay, so the buffer never
+sees it.
+
+### N1 (was LEFT OPEN) — "the reverb's diffusion allpasses are not allpasses". **WITHDRAWN: the finding was wrong.**
+
+The claim was that `out = 0.75*d - 0.5*x` against a feedback of `0.5` gives a magnitude running
+from -6.0 dB at DC to -1.6 dB at the delay's Nyquist. That reads the two coefficients against
+each other and misses that the delayed value is read *before* the write. Working it through,
+`d = z^-m (x + 0.5 d)`, so
+
+```
+  H(z) = 0.75 * z^-m/(1 - 0.5 z^-m) - 0.5  =  (z^-m - 0.5) / (1 - 0.5 z^-m)
+```
+
+which is the unity-gain Schroeder allpass with g = 0.5, exactly. Measured magnitude of one
+section at w = 0, pi/4, pi/2, 3pi/4, pi, at all four delay lengths:
+
+```
+  shipped  delay 225: -0.00 -0.00 -0.00 -0.00 -0.00 dB  ->  ripple 0.000 dB
+  shipped  delay 341: -0.00 -0.00 -0.00  0.00 -0.00 dB  ->  ripple 0.000 dB
+  shipped  delay 441: -0.00  0.00  0.00  0.00 -0.00 dB  ->  ripple 0.000 dB
+  shipped  delay 556: -0.00 -0.00 -0.00 -0.00 -0.00 dB  ->  ripple 0.000 dB
+```
+
+The replacement that was built and reverted (`y = -g*x + d`, `buf = x + g*d`) is the one that
+is not unity gain: `H(z) = (1.25 z^-m - 0.5)/(1 - 0.5 z^-m)`.
+
+```
+  wave3    delay 225:  3.52  2.33  1.61  1.39  1.34 dB  ->  ripple 2.183 dB
+  wave3    delay 556:  3.52  1.34  3.52  1.34  3.52 dB  ->  ripple 2.183 dB
+```
+
++3.52 dB at DC and 2.183 dB of ripple per section, four of them in series. That is why every
+number got worse, and reverting was right for a reason that had nothing to do with modal
+density. The sections were correct all along; the false claim is removed from the test comment.
+
+### N-tilt (was LEFT OPEN as part of N1) — the 3.2 dB spectral tilt. **NOW IMPROVED, with one number that did not improve.**
+
+Reproduced: yes, 3.22 dB exactly, and L/R correlation 0.163 exactly, once the probe used the
+same Hann-windowed estimator and the same two-channel buffer the suite uses. (A rectangular
+window reads 3.98 dB and a true-mono buffer 2.80 dB on the same build — the published figure is
+specifically the stereo path measured with a Hann window.)
+
+**First, a caveat that shapes everything below: 3.22 dB and 0.163 are single draws from wide
+distributions.** Over six noise seeds the unmodified build measures:
+
+```
+  2-ch spread: 3.22 5.68 5.76 4.23 2.55 4.21   mean 4.28 dB, worst 5.76 dB
+  |L/R corr| : 0.043 0.036 0.225 0.155 0.347 0.059   mean 0.144, worst 0.347
+```
+
+So the suite's 4.5 dB guard was only passing because of seed 5150; seeds 2 and 3 exceed it.
+Candidates were therefore judged on the six-seed mean, not on the audit's single seed.
+
+The cause named in the audit — the comb bank's low-frequency modal density — is correct. The
+bank was the Freeverb set, and it is badly conditioned:
+
+```
+  1116 = 2^2*3^2*31   1188 = 2^2*3^3*11   1277 = prime      1356 = 2^2*3*113
+  1422 = 2*3^2*79     1491 = 3*7*71       1557 = 3^2*173    1617 = 3*7^2*11
+  21 of the 28 pairs share a common factor; 7 of the 8 are divisible by 3
+  ratio max/min 1.449
+  stereo split: L = 4 lines over 1.215:1 (sum 4937) | R = 4 over 1.137:1 (sum 6087)
+```
+
+Six sets were built and measured, six seeds each, stereo path:
+
+```
+  8 lines, Freeverb (baseline)            mean 4.28  worst 5.76 dB
+  8 distinct primes, 1:1.49               mean 4.87  worst 6.27
+  8 distinct primes, 1:1.50, 43 % longer  mean 4.41  worst 6.07
+  8 distinct primes, 1:2.02               mean 5.05  worst 7.69
+  12 distinct primes, 1:1.50              mean 4.40  worst 4.92
+  12 distinct primes, 1:2.02              mean 3.79  worst 4.95
+  16 distinct primes, 1:1.51              mean 3.21  worst 4.19
+  16 distinct primes, 1:2.02   (shipped)  mean 2.35  worst 3.11
+```
+
+**Conditioning alone cannot do it.** No 8-line set beats 4.41 dB however well chosen, and the
+best-conditioned 8-line set (distinct primes over 1:1.49) is the *worst* of the lot at 4.87.
+Line count is the lever, which is what a modal-density diagnosis predicts. Three stereo splits
+of the winning 16 were compared and even log-spacing per side won by a wide margin (2.35 dB
+mean, against 3.99 for a paired interleave and 5.08 for a block split).
+
+Shipped: 16 mutually-prime lines over 1:1.95, eight per stereo half, interleaved so each
+channel spans the whole range.
+
+```
+                                        before -> after
+  spread, wave 3's seed                  3.22 -> 3.11 dB
+  spread, six-seed mean                  4.28 -> 2.35 dB
+  spread, six-seed worst                 5.76 -> 3.11 dB
+  per-octave-band RT60 deviation        0.577 -> 0.513 s  (3.16 -> 2.71 dB of decay rate)
+  modal ringing 40-500 Hz, tallest peak +21.13 -> +19.34 dB over the band mean
+  mono-sum path spread, six-seed mean    3.61 -> 4.21 dB   (range 2.84 -> 0.58 dB)
+  |L/R corr|, wave 3's seed             0.163 -> 0.171
+  |L/R corr|, six-seed mean             0.144 -> 0.152
+  reverb CPU, 48 kHz, blocks of 512     0.42-0.43 % -> 0.76-0.88 % of one core
+```
+
+**Two of these did not improve and are not being presented as if they had.** The L/R
+correlation is marginally worse on both the single seed and the mean, and misses the bar that
+had been set for it (0.163). Every one of the eight candidates landed between 0.109 and 0.176
+against a baseline whose own seed-to-seed range is 0.036-0.347, so this measurement cannot
+separate the sets and was not allowed to decide. The mono-sum path's mean is 0.6 dB worse,
+though its seed-to-seed range collapses from 2.84 dB to 0.58 dB, so the old figure was one
+lucky seed rather than a flatter response. The judgement call — ship it for a 1.9 dB mean
+improvement on the stereo path that holds on all six seeds, and report the two numbers that
+went the other way — is the owner's to reverse; the comb table is one edit.
+
+**This changes the voicing of the reverb.** Parameter IDs, ranges and defaults are untouched,
+so every session loads identically, but the tank itself is a different room. Wet level is held
+deliberately: the lines are mutually prime so they sum incoherently and the scale is
+1/sqrt(lines summed), referenced to the old bank. Measured wet RMS moves by at most 0.39 dB
+and typically 0.11 dB; without that normalisation it fell 3.1 dB everywhere.
+
+The suite's flatness guard tightens from 4.5 dB to 4.0 dB.
+
+**A test defect found on the way.** `SmokeTest`'s RT60 estimator took two 50 ms points 250 ms
+apart and divided. Over a 2 s or 5 s decay that measures the band's modal beating, not the
+decay rate. Against the **old** reverb, both ways:
+
+```
+  decay knob   2-point     least squares
+     0.5 s     0.498 s        0.501 s
+     2.0 s     2.272 s        1.904 s
+     5.0 s     7.889 s        4.330 s   <- 58 % high, and never tested
+```
+
+The check only looked at 0.5 s and 2.0 s, so it passed. It is now a least-squares fit over the
+40 dB below the start of the decay and asserts three settings instead of two, at the same 15 %.
+The new estimator passes against both banks (old 0.501 / 1.904 / 4.330 s, new 0.496 / 2.111 /
+4.729 s); the old estimator fails the new bank. This is a stricter assertion, not a loosened
+one — the tolerance is unchanged and the coverage grew.
+
+### N8 (was LEFT OPEN) — compressor attack about twice the knob. **NOW CALIBRATED.**
+
+Reproduced: yes, 2.83 / 20.33 / 94.83 ms for knob 1 / 10 / 50, and the crest-factor figure
+2.16 dB, both exact.
+
+The reason for leaving it open was sound: the detector's 8 ms RMS branch is what makes the gain
+reduction track peak level instead of crest factor, so removing it would change the compressor's
+character. The branch stays. The knob is calibrated against it instead.
+
+Sweeping the internal time constant at a fixed reference condition (48 kHz, 1 kHz tone,
+threshold -20 dB, ratio 4, a -40 -> -6 dBFS step = 10.5 dB of final gain reduction) gives a
+clean linear relation, `measured t63 = 1.888 * internal + 1.158 ms` over 2..100 ms with
+residuals inside 0.9 ms. `internalAttackMs()` inverts it. Printed vs measured:
+
+```
+  knob      before -> after        knob       before -> after
+   0.1 ms     2.00 ->  2.00         15 ms         -   -> 15.33
+   1.0 ms     2.83 ->  2.00         25 ms         -   -> 25.33
+   3.0 ms       -   ->  2.83        50 ms       94.83 -> 49.83
+   5.0 ms       -   ->  4.83        75 ms         -   -> 74.83
+  10.0 ms    20.33 -> 10.33        100 ms         -   -> 99.33
+```
+
+From 3 ms up the printed value holds within 6 %, and within 3.3 % from 10 ms. Asserted at seven
+settings.
+
+**Below about 2 ms the knob still cannot be honoured**, and no mapping can fix that: the RMS
+window puts a floor of roughly 2 ms on how fast the detector can rise. That was already true
+(a 1 ms knob measured 2.83 ms before) and is now stated in the code and asserted.
+
+The calibration is a reference-condition one, not an identity. The measured figure also depends
+on how deep the gain reduction is (14.83 ms at 18 dB of GR against 29.33 ms at 4.5 dB, same
+setting) and on the signal's frequency (13.83 ms at 100 Hz against 20.50 ms at 5 kHz). Both are
+inherent to a log-domain one-pole detector. Sample rate and the Release setting do not affect
+it: 20.29-20.33 ms across 44.1 / 48 / 96 / 192 kHz, and identical across release 10-1000 ms.
+
+Crest-independence is intact: square vs sine gain reduction 2.16 dB -> 2.13 dB.
+
+**BEHAVIOUR CHANGE for saved sessions.** The parameter ID, range and default are untouched, so
+every session loads with the same number on the knob — but that number now buys about half the
+attack time it used to. Factory presets 1, 2, 3 and 4 set 15 / 5 / 25 / 20 ms and will all
+attack roughly 1.9x faster. The alternative was to keep the timing and relabel the knob; a
+control printed in milliseconds should mean milliseconds, so it was calibrated. To restore the
+old timing, make `internalAttackMs()` return its argument unchanged.
+
+### M7 (LEFT OPEN) — notes 35-49 stolen from the instrument on every channel. **STILL LEFT OPEN. The decision holds; the reason recorded for it did not.**
+
+The recorded reason was "would change saved sessions". That is true of the *music*, but it is
+not true of anything this plugin saves, and the difference matters because it removes the usual
+escape hatch. Measured:
+
+```
+1. SAVED STATE
+   state size 2337 bytes, 58 parameters in the tree
+   every attribute name in the saved XML (6 distinct):
+     version encoding hostProgram id value p
+   attribute names containing "note", "key", "pitch" or "pad": NONE
+
+2. ROUTING OF ONE NOTE (38 = D1, inside the 35-49 window)
+                                     drums -40dB   inst -40dB  -> carried by
+   note 38 ch 1  (in the window)       -55.38 dB    -29.38 dB  -> DRUM ENGINE
+   note 38 ch 10 (GM drum chan)        -55.38 dB    -29.38 dB  -> DRUM ENGINE
+   note 52 ch 1  (above window)        -21.78 dB    -55.74 dB  -> INSTRUMENT
+   note 34 ch 1  (below window)        -20.73 dB    -54.52 dB  -> INSTRUMENT
+```
+
+Not one of the 58 parameters is a note number, and the only non-parameter state is a host
+program index plus a favourites list of program indices. So there is no plugin state to
+migrate, and a version hint would buy nothing.
+
+The note numbers live in the **host's MIDI clips**, which the plugin cannot read, version,
+migrate or even detect. A bass part written on channel 1 between B0 and C#2 plays drums today;
+narrow the window and the same clip plays the synth, silently, with no way for the plugin to
+warn anyone. That is a stronger argument for leaving it alone than the one first given, not a
+weaker one. **Not changed.** It stays documented in `README.md` under "Known issues and debt".
+
+### Wave-4 verification
+
+```
+ctest --test-dir build --output-on-failure        4/4 passed, 71.31 s
+  MixAgentSmokeTest      151/151        MixAgentCharacterTest   46/46  (was 42/42)
+  MixAgentAuditTest       11/11         EditorProbe             12/12
+total allocations inside processBlock across 24 rate/block combinations: 0
+latency (sat off): reported 193 measured 193 | (sat on): reported 193 measured 193
+  plus limiter engaged, and at 96 kHz - reported == measured at every setting
+```
+
+216 -> 220 checks. No assertion was loosened: the flatness guard tightened from 4.5 to 4.0 dB,
+the RT60 check gained a third setting at the same 15 % tolerance, and four checks were added.
+
+---
+
 ## Summary
 
 | # | Severity | Finding | Status |
@@ -588,25 +866,28 @@ still name targets that exist (`MixAgent_VST3`, `MixAgent_Standalone`, `EditorPr
 | M4 | MAJOR | Naive saw, fold-down to −9 dBc | FIXED — PolyBLEP, −76 to −97 dBc |
 | M5 | MAJOR | Tube mode −1.6 dB and 3rd-dominant | FIXED — unity, 2nd leads by 7–19 dB |
 | M6 | MAJOR | Presets additive, "Init" a no-op | FIXED — 118/132 contaminated → 0/132 |
-| M7 | MAJOR | Notes 35–49 stolen from the instrument on all channels | LEFT OPEN — would change saved sessions |
+| M7 | MAJOR | Notes 35–49 stolen from the instrument on all channels | LEFT OPEN — no plugin state stores notes, but the host's MIDI clips do (wave 4) |
 | M8 | MAJOR | 63.7 MB unreferenced, six stray process docs, no README | FIXED — 134 files removed, one README |
-| N1 | MINOR | Reverb diffusers are not allpasses | LEFT OPEN — fixing them measured *worse* |
+| N1 | MINOR | Reverb diffusers are not allpasses | WITHDRAWN — they are; measured ripple 0.000 dB (wave 4) |
 | N2 | MINOR | `shapingOff` dead parameter | FIXED |
 | N3 | MINOR | Dead members (`Voice::note`, `preparedBlock`) | FIXED |
-| N4 | MINOR | Reverb pre-delay after the tank | LEFT OPEN — would change every reverb setting |
+| N4 | MINOR | Reverb pre-delay after the tank | FIXED (wave 4) — null test −118.1 dBc, automation 3.66 → 0.00 dB |
 | N5 | MINOR | Reverb param smoothing follows the block size | LEFT OPEN — inaudible, documented |
 | N6 | MINOR | `-Wshadow` at three sites | FIXED — strict set clean, enforced in CI |
 | N7 | MINOR | Undocumented always-on delay wobble | DOCUMENTED + asserted (1.55–13.5 cents) |
-| N8 | MINOR | Compressor attack ~2× the knob | LEFT OPEN — the RMS branch is the feature |
+| N8 | MINOR | Compressor attack ~2× the knob | FIXED (wave 4) — calibrated; 20.33 → 10.33 ms for a 10 ms knob |
 | N9 | MINOR | Width 0 mono fold differs by rounding | LEFT OPEN — −145.9 dBc |
 | N10 | MINOR | `in_gain`, `out_gain`, `drum_level` have no control on the editor | FIXED — 42 → 45 knobs |
 | N11 | MINOR | Ten knobs could only print "0" or "1"; no units | FIXED — percentages, Hz, % |
 | N12 | MAJOR | Opening the editor reset every parameter | FIXED — caught by EditorProbe |
 | N13 | MINOR | `getTailLengthSeconds()` fixed at 5 s vs a 68 s measured tail | FIXED — computed from the settings, capped at 30 s |
 
+New in wave 4: the reverb's spectral tilt (a comb-bank rebuild, 4.28 → 2.35 dB on a six-seed
+mean), and a defect in `SmokeTest`'s own RT60 estimator that read 58 % high at a 5 s decay.
+
 Test counts: 151 → 151 (`MixAgentSmokeTest`), 0 → 11 (`MixAgentAuditTest`),
-0 → 42 (`MixAgentCharacterTest`), 9 → 12 (`EditorProbe`). **160 → 216 checks** in total,
-29.1 s for the whole `ctest` run.
+0 → 46 (`MixAgentCharacterTest`), 9 → 12 (`EditorProbe`). **160 → 220 checks** in total,
+71.3 s for the whole `ctest` run.
 
 Sanitizers: the whole suite under `-fsanitize=address,undefined` —
 `MixAgentSmokeTest` 151/151, `MixAgentAuditTest` 11/11, `MixAgentCharacterTest` 42/42, all

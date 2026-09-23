@@ -128,8 +128,11 @@ latency, which stays constant whether the module is on or off.
 **Compressor** — `Thresh` −60…0 dB, `Ratio` 1…20:1, `Attack` 0.1…100 ms, `Release` 10…1000 ms,
 `Knee` 0…24 dB (quadratic), `Makeup` 0…24 dB, `Mix` 0…1 for parallel compression. The detector
 is a hybrid of peak and an 8 ms RMS, which makes the gain reduction nearly independent of crest
-factor (a square and a sine at the same peak level land 2.2 dB apart) at the cost of the Attack
-knob being approximate rather than exact — see `AUDIT.md` N8.
+factor (a square and a sine at the same peak level land 2.1 dB apart). The RMS window slows the
+level rise, so the Attack knob is calibrated against it: measured time to 63 % of the final
+gain reduction is 10.33 ms for a 10 ms setting, 25.33 for 25 and 49.83 for 50 — the printed
+value holds within 3.3 % from 10 ms up and within 6 % from 3 ms up. Below about 2 ms the knob
+saturates, because the RMS window puts a floor there that no mapping can lift. See `AUDIT.md` N8.
 
 **Imager** — `Width` 0…200 % (measured side gain: 0.000 at 0 %, 0.500 at 50 %, 0.999 at 100 %,
 1.998 at 200 % — 100 % really is unaltered), `Balance` −1…+1 with a constant-power cosine law,
@@ -141,7 +144,11 @@ wobble whose depth follows the delay time: 1.6 cents peak-to-peak at 100 ms, 13.
 2000 ms. It is deliberate tape/BBD character and there is no control for it.
 
 **Reverb** — `Size` 0.1…1.0 scales the tank, `Decay` 0.2…10 s is the low-frequency RT60,
-`Damp` shortens the highs, `Width`, `Mix`, `PreDelay` 0…250 ms.
+`Damp` shortens the highs, `Width`, `Mix`, `PreDelay` 0…250 ms (in front of the tank, so it sets
+the gap before the onset and leaves a ringing tail alone). The tank is 16 mutually-prime comb
+lines spread over a 1:1.95 range, eight per stereo half, into four unity-gain Schroeder
+allpasses. The late field is flat to within 2.35 dB from 125 Hz to 8 kHz on a six-seed mean
+(3.11 dB worst); the reverb stage costs 0.76–0.88 % of one core at 48 kHz in blocks of 512.
 
 **Limiter** — `Ceiling` −20…0 dB, `Attack` 0.01…10 ms, `Release` 10…500 ms. A 3 ms lookahead
 with a 4× polyphase true-peak sidechain; measured with an independent 8× interpolator the output
@@ -201,27 +208,39 @@ Ranked; the measurements behind them are in `AUDIT.md`.
    sounding. A per-voice recipe snapshot would be correct. (`InstrumentBank.h`)
 2. **Notes 35–49 are captured by the drums on every MIDI channel**, so the instrument cannot play
    B0–C#2 from an ordinary keyboard track. Channel 10 already reaches the whole GM map; the
-   unconditional window is a compatibility shim. Changing it would alter how existing sessions
-   sound, so it is left as-is and documented. (`PluginProcessor.cpp:282`)
-3. **Reverb pre-delay is applied after the tank**, so it moves the whole wet signal rather than
-   only the onset. (`Reverb.h`)
+   unconditional window is a compatibility shim. It is left as-is, and the reason is worth
+   stating precisely: nothing this plugin saves contains a note number (the state is 58
+   parameter values, a host program index and a favourites list of program indices), so there is
+   no plugin state to migrate and a version hint would buy nothing. The note numbers live in the
+   **host's MIDI clips**, which the plugin cannot read, version or even detect — so a bass part
+   written on channel 1 between B0 and C#2 would silently become a synth part with no way to warn
+   anyone. (`PluginProcessor.cpp:312`)
 4. **No user WAV loading.** A "bring your own one-shots" slot (decode on the message thread into
    RAM, then play from a voice) is designed but not built.
 5. **`-Wold-style-cast` is not adopted.** 1002 numeric C-style casts are the codebase's style;
    `-Wall -Wextra -Wshadow -Wnon-virtual-dtor -Woverloaded-virtual -Wunused` is clean.
-6. **Reverb late-field tilt.** The tank is flat to within 3.22 dB from 125 Hz to 8 kHz with
-   damping off. The four diffusers are not unity-gain allpasses, which looks like the cause —
-   but rebuilding them as proper allpasses measured *worse* (spread 3.22 → 3.97 dB, L/R
-   correlation 0.163 → 0.289). The tilt is the comb bank's sparse low-frequency modal density;
-   flattening it needs an FDN, not a coefficient.
-7. **Compressor Attack is approximate, by design.** The detector takes
-   `max(peak, 1.414·√RMS)` with an 8 ms RMS window, which is what makes the gain reduction
-   nearly independent of crest factor — and which stretches the knob: 1/10/50 ms measure
-   2.83/20.33/94.83 ms to 63 % of the final reduction. Making it exact means dropping the RMS
-   branch and changing how the compressor responds to everything.
-8. **Reverb parameter smoothing follows the host's block size** (`paramCoef` is derived from the
+6. **Reverb late-field tilt, reduced but not gone.** Rebuilding the comb bank as 16
+   mutually-prime lines over a 1:1.95 range took the worst-band deviation from a 4.28 dB
+   six-seed mean to 2.35 dB, and L/R correlation is a wash (0.144 → 0.152 on the same six
+   seeds). Two figures did not improve: the correlation, marginally, and the mono-sum path's
+   mean (3.61 → 4.21 dB, though its seed-to-seed range collapses from 2.84 dB to 0.58 dB).
+   Going below about 2 dB looks like an FDN rather than more Schroeder combs. Note that this
+   measurement is strongly seed-dependent, so single-seed figures should not be trusted:
+   the unmodified build ranged 2.55–5.76 dB across six noise seeds.
+7. **Reverb voicing changed in wave 4.** Parameter IDs, ranges and defaults are untouched and
+   every session loads identically, but the comb bank is a different room and the wet level is
+   held only to within 0.39 dB (typically 0.11 dB). Presets dialled in by ear may want a
+   re-listen.
+8. **Compressor Attack saturates below about 2 ms.** The knob is calibrated so the printed value
+   is the measured attack from 3 ms up, but the detector's 8 ms RMS branch — which is what keeps
+   the gain reduction crest-independent — puts a floor of roughly 2 ms on how fast it can rise.
+   The calibration is also tied to a reference condition: the measured figure still varies with
+   how deep the gain reduction is (14.8 ms at 18 dB of GR against 29.3 ms at 4.5 dB) and with
+   frequency (13.8 ms at 100 Hz against 20.5 ms at 5 kHz), as it does for any log-domain
+   one-pole detector.
+9. **Reverb parameter smoothing follows the host's block size** (`paramCoef` is derived from the
    block size promised in `prepare`, and `updateCoefficients()` runs once per `process()` call).
-9. **Nothing has been verified in a real host.** No DAW, no `pluginval` and no audio device were
+10. **Nothing has been verified in a real host.** No DAW, no `pluginval` and no audio device were
    available; `EditorProbe` proves the editor's wiring, not its appearance.
 
 ## Licence

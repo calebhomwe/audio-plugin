@@ -1,5 +1,87 @@
 # Changelog
 
+## 2026-09-23 (wave 4) — closing what wave 3 left open
+
+Four items. Each started by reproducing wave 3's number before anything changed, and two of
+those re-measurements overturned the earlier conclusion. Full workings in `AUDIT.md` under
+"Wave 4".
+
+### Fixed
+
+- **Reverb pre-delay now sits in front of the tank** (`Source/DSP/Reverb.h`). It was applied to
+  the tank's output. The audit assumed moving it would change every existing reverb setting;
+  measurement says otherwise — the tank is linear and time-invariant, so the delay commutes
+  with it, and the 40 ms impulse response before and after differs by **−118.1 dBc** with
+  83.2 % of samples bit-identical. No preset's sound moves. What *was* wrong is the knob under
+  automation: stepping pre-delay 0 → 100 ms during a decaying tail used to slide a read pointer
+  back over the wet history and re-play the louder earlier part of the decay, **3.66 dB** away
+  from the un-automated reference. Now **0.00 dB**. Onset still lands at the pre-delay setting
+  plus the tank's own 17.67 ms, and the tail length is unchanged at every setting.
+- **Reverb comb bank rebuilt: 16 mutually-prime lines over a 1:1.95 range, eight per stereo
+  half** (`Source/DSP/Reverb.h`). The old set was the Freeverb numbers, with 21 of its 28 pairs
+  sharing a common factor and seven of eight divisible by 3, split 4/4 so each channel had four
+  lines over a 1.2:1 spread. Eight candidate sets were measured over six noise seeds: no 8-line
+  set beats 4.41 dB however well conditioned, so line count — not coefficients — is the lever,
+  exactly as a modal-density diagnosis predicts. Worst-band deviation **4.28 → 2.35 dB** on the
+  six-seed mean (5.76 → 3.11 dB worst, 3.22 → 3.11 dB on wave 3's single seed). Per-octave-band
+  RT60 deviation 0.577 → 0.513 s; modal ringing below 500 Hz +21.13 → +19.34 dB. Wet level is
+  held to within 0.39 dB by a 1/sqrt(lines) scale. **The reverb is voiced differently** —
+  parameter IDs, ranges and defaults are untouched so sessions load identically, but the tank is
+  a different room. Costs 0.42–0.43 % → 0.76–0.88 % of one core.
+- **Compressor Attack knob calibrated to the attack it delivers** (`Source/DSP/Compressor.h`).
+  It read about twice the knob: 1/10/50 ms measured 2.83/20.33/94.83 ms. The cause is the
+  detector's 8 ms RMS branch, which is what keeps the gain reduction crest-independent, so the
+  branch stays and the mapping was calibrated against it instead. Now 10.33 ms for a 10 ms
+  setting, 25.33 for 25, 49.83 for 50 — within 3.3 % from 10 ms up and 6 % from 3 ms up.
+  Crest-independence intact (2.16 → 2.13 dB between a square and a sine).
+  **Behaviour change for saved sessions:** the same number on the knob now buys about half the
+  attack time. Factory presets 1–4 (15/5/25/20 ms) will attack roughly 1.9× faster.
+
+### Corrected — two wave-3 findings were wrong
+
+- **The reverb's diffusion sections *are* unity-gain allpasses.** `AUDIT.md` N1 claimed
+  `out = 0.75*d − 0.5*x` against a 0.5 feedback gives −6.0 dB at DC to −1.6 dB at Nyquist. That
+  reads the coefficients against each other and misses that the delayed value is read before the
+  write: `H(z) = (z^-m − 0.5)/(1 − 0.5 z^-m)`, the textbook allpass. **Measured ripple of one
+  section over 0…π, at all four lengths: 0.000 dB.** The replacement wave 3 built and reverted
+  has `H(z) = (1.25 z^-m − 0.5)/(1 − 0.5 z^-m)` — 2.183 dB of ripple and +3.52 dB at DC, four in
+  series. That, not modal density, is why it measured worse. The sections were always right.
+- **`SmokeTest`'s RT60 estimator was the broken instrument.** It took two 50 ms points 250 ms
+  apart and divided, which over a long decay measures the band's modal beating. Against the *old*
+  reverb it read **7.889 s for a 5.0 s setting** — 58 % high, and never tested, because the check
+  only looked at 0.5 s and 2.0 s. Replaced with a least-squares fit over the 40 dB below the
+  start of the decay, now asserting three settings at the same 15 % tolerance. It passes against
+  both the old bank (0.501/1.904/4.330 s) and the new one (0.496/2.111/4.729 s).
+
+### Measured and deliberately NOT changed
+
+- **Notes 35–49 still go to the drums on every channel.** Wave 3 left this alone because it
+  "would change saved sessions"; the evidence refines that. Nothing the plugin saves holds a note
+  number — the state's six distinct XML attribute names are `version encoding hostProgram id
+  value p`, i.e. 58 parameter values, a host program index and a favourites list of program
+  indices — so there is no plugin state to migrate and a version hint would buy nothing. The note
+  numbers live in the **host's MIDI clips**, which the plugin cannot read, version or detect.
+  That makes the case for leaving it alone stronger, not weaker.
+- **L/R decorrelation did not improve and is reported as such**: 0.163 → 0.171 on wave 3's seed,
+  0.144 → 0.152 on a six-seed mean. All eight comb candidates landed between 0.109 and 0.176
+  against a baseline ranging 0.036–0.347 across seeds, so the measurement cannot separate them
+  and was not allowed to decide.
+- **The mono-sum reverb path's tilt got slightly worse**: 3.61 → 4.21 dB on the six-seed mean,
+  although its seed-to-seed range collapses from 2.84 dB to 0.58 dB.
+
+### Tests
+
+- Four checks added to `MixAgentCharacterTest` (42 → 46): the wet onset equals the pre-delay
+  setting plus the tank's own onset; the tail length does not change with the pre-delay;
+  automating the pre-delay leaves a ringing tail untouched; measured attack equals the printed
+  knob within 10 % from 3 ms up. Each was run against the pre-wave-4 code to confirm it fails
+  there.
+- **216 → 220 checks**, 4/4 ctest targets pass in 71.3 s. Allocations inside `processBlock`
+  across 24 rate/block combinations: **0**. Reported latency equals measured at every setting
+  (193 samples, saturation on and off, limiter engaged, and at 96 kHz).
+- No assertion was loosened: the reverb flatness guard tightened from 4.5 dB to 4.0 dB and the
+  RT60 check gained a setting at an unchanged tolerance.
+
 ## 2026-09-22 (wave 3) — merciless audit, hygiene pass, authenticity
 
 `AUDIT.md` is the full record: every finding with a `file:line`, a mechanism and the command
