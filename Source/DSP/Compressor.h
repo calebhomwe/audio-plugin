@@ -160,11 +160,39 @@ public:
 private:
     static float slopeFor(float r) { return 1.0f - 1.0f / (r > 1.0f ? r : 1.0f); }
 
+    // The Attack knob is printed in milliseconds, so it should mean milliseconds.
+    // It did not: the detector is max(peak, 1.414 * sqrt(RMS)) with an 8 ms RMS
+    // window, and that window slows the level rise, so the measured time to 63 %
+    // of the final gain reduction came out about twice the knob. The hybrid
+    // detector is the feature - it is what makes the gain reduction depend on peak
+    // level rather than crest factor, measured at 2.16 dB between a square and a
+    // sine of the same peak - so the detector stays and the knob is calibrated
+    // against it instead.
+    //
+    // Measured at 48 kHz, 1 kHz tone, threshold -20 dB, ratio 4, -40 -> -6 dBFS
+    // step (10.5 dB of final gain reduction), the relation is linear:
+    //     measured t63 = 1.888 * internal time constant + 1.158 ms
+    // over internal 2..100 ms, residuals within 0.9 ms. This inverts it. The
+    // reference condition matters: the measured figure also depends on how deep
+    // the gain reduction is (14.8 ms at 18 dB of GR against 29.3 ms at 4.5 dB, for
+    // the same setting) and on the signal's frequency (13.8 ms at 100 Hz against
+    // 20.5 ms at 5 kHz), which is true of any log-domain one-pole detector and is
+    // not something a mapping can remove.
+    //
+    // Below roughly 2 ms the knob cannot be honoured at all: the RMS window puts a
+    // floor of about 2 ms on how fast the detector can rise, so the bottom of the
+    // range saturates there.
+    static float internalAttackMs(float knobMs)
+    {
+        const float t = (knobMs - 1.15802f) / 1.88797f;
+        return t > 0.05f ? t : 0.05f;
+    }
+
     void updateCoefs()
     {
         const double fs = sr > 0.0 ? sr : 44100.0;
         // one-pole step coefficients: env += coef * (target - env)
-        attackCoef = (float)(1.0 - std::exp(-1.0 / (attackMs * 0.001 * fs)));
+        attackCoef = (float)(1.0 - std::exp(-1.0 / (internalAttackMs(attackMs) * 0.001 * fs)));
         releaseCoef = (float)(1.0 - std::exp(-1.0 / (releaseMs * 0.001 * fs)));
         rmsCoef = (float)(1.0 - std::exp(-1.0 / (8.0 * 0.001 * fs)));
         mixCoef = (float)(1.0 - std::exp(-1.0 / (10.0 * 0.001 * fs)));
