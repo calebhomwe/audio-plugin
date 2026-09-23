@@ -13,6 +13,8 @@
 #include "../Source/DSP/StereoImager.h"
 #include "../Source/DSP/DrumEngine.h"
 #include "../Source/DSP/InstrumentBank.h"
+#include <algorithm>
+#include <cmath>
 #include <iomanip>
 #include <iostream>
 #include <vector>
@@ -202,9 +204,18 @@ static void compressorSuite()
     {
         // Attack / release against the knob: a dB-domain one-pole reaches 63 %
         // of its target in one time constant.
+        // The knob is calibrated so the printed value IS the measured attack (see
+        // Source/DSP/Compressor.h). Before the calibration this read 2.83 ms for a
+        // 1 ms knob, 20.33 for 10 and 94.83 for 50 - about twice the knob, because
+        // the detector's 8 ms RMS branch slows the level rise. The branch is the
+        // feature (it is what keeps the gain reduction crest-independent, asserted
+        // just below), so the mapping was calibrated against it rather than removed.
+        // Below about 2 ms the RMS window puts a floor on how fast the detector can
+        // rise and the knob saturates; from 3 ms up the printed value holds.
         std::cout << "  attack / release from a -40 -> -6 dBFS burst:\n";
         bool ok = true;
-        for (float atk : { 1.0f, 10.0f, 50.0f })
+        bool calibrated = true;
+        for (float atk : { 1.0f, 3.0f, 5.0f, 10.0f, 25.0f, 50.0f, 100.0f })
         {
             agm::Compressor c;
             c.prepare(sr, 64);
@@ -233,8 +244,14 @@ static void compressorSuite()
                       << " ms -> 63 % of " << finalGr << " dB GR reached at "
                       << std::setprecision(2) << ms << " ms\n";
             if (t63 < 0 || ms > atk * 2.0 + 1.5 || ms < atk * 0.4 - 1.0) ok = false;
+            // the calibrated bound: within 10 % of the printed value, or the 2 ms
+            // floor for the settings that cannot be reached at all
+            if (t63 < 0) calibrated = false;
+            else if (atk >= 3.0f) { if (std::abs(ms - atk) > atk * 0.1 + 0.25) calibrated = false; }
+            else if (ms > 2.25) calibrated = false;
         }
         check(ok, "compressor: attack time to 63 % of the final gain reduction tracks the knob");
+        check(calibrated, "compressor: measured attack equals the printed knob within 10 % from 3 ms up");
     }
 
     {
@@ -760,16 +777,25 @@ static void reverbSuite()
             spread = std::max(spread, std::abs(lvl[i] - mean));
         }
         std::cout << "\n  worst deviation from mean: " << std::setprecision(2) << spread << " dB\n";
-        // 3.2 dB is what an 8-comb Schroeder tank delivers here. The four
-        // diffusers are NOT unity-gain allpasses (out = 0.75*d - 0.5*x against a
-        // feedback of 0.5, so |H| runs from -6.0 dB at DC to -1.6 dB), which
-        // looks like the obvious culprit - but rebuilding them as proper
-        // allpasses and re-trimming the wet level to match made the spread WORSE,
-        // 3.22 -> 3.97 dB, and the L/R correlation worse too, 0.163 -> 0.289.
-        // The tilt is the comb bank's sparse low-frequency modal density, not the
-        // diffusers, and flattening that needs a different topology (an FDN), not
-        // a coefficient. The guard is set at 4.5 dB to catch a regression.
-        check(spread < 4.5, "reverb: with damping off the late field is flat within 4.5 dB from 125 Hz to 8 kHz");
+        // The tilt is the comb bank's low-frequency modal density. The bank is now
+        // 16 mutually-prime lines over a 1:2 range, 8 per stereo half, which took
+        // this figure from 3.22 dB to 3.11 dB on this seed and from a 4.28 dB
+        // six-seed mean to 2.35 dB. Eight lines cannot do it at any conditioning:
+        // measured means were 4.28 (the old Freeverb set), 4.87, 4.41 and 5.05 dB
+        // for four differently conditioned 8-line sets, against 3.21 and 2.35 for
+        // two 16-line sets. Count, not coefficients.
+        //
+        // NOT the diffusers, and not for the reason the audit first gave. It
+        // claimed the four sections are not unity-gain allpasses, reading the 0.75
+        // feed-forward against the 0.5 feedback. That is a misreading: with the
+        // delayed value read before the write, H(z) = (z^-m - 0.5)/(1 - 0.5 z^-m),
+        // which is exactly the unity-gain Schroeder allpass. Measured ripple of one
+        // section over 0..pi, at all four lengths: 0.000 dB. The "proper allpass"
+        // that was built to replace it (y = -g*x + d, buf = x + g*d) has
+        // H(z) = (1.25 z^-m - 0.5)/(1 - 0.5 z^-m), 2.183 dB of ripple and +3.52 dB
+        // at DC - which is why it measured worse on every number and was reverted.
+        // The sections are correct; leave them alone.
+        check(spread < 4.0, "reverb: with damping off the late field is flat within 4.0 dB from 125 Hz to 8 kHz");
     }
 
     {
@@ -800,6 +826,127 @@ static void reverbSuite()
         std::cout << "  L/R correlation of the tail from a mono source, width 1.0: "
                   << std::setprecision(3) << corr << "\n";
         check(std::abs(corr) < 0.8, "reverb: the tail is decorrelated between channels (|r| < 0.8)");
+    }
+
+    {
+        // Pre-delay is the gap between the dry sound and the tank's onset, so it
+        // must delay the tank's INPUT. Two things then have to hold: the wet output
+        // starts at the pre-delay setting plus the tank's own onset, and the tail
+        // length does not move with the setting. Both are measured from an impulse.
+        auto impulseAt = [&](float pd, int ch)
+        {
+            agm::Reverb r;
+            r.prepare(sr, 64);
+            r.setEnabled(true);
+            r.setDamping(0.5f); r.setDecaySec(2.0f); r.setSize(0.7f);
+            r.setMix(1.0f); r.setWidth(1.0f); r.setPreDelayMs(pd);
+            AudioBuffer<float> b(ch, 64);
+            for (int i = 0; i < 200; ++i) { b.clear(); r.process(b); }   // settle
+            const int n = (int)(sr * 6.0);
+            std::vector<float> out((size_t)n, 0.0f);
+            for (int done = 0; done < n; done += 64)
+            {
+                b.clear();
+                if (done == 0) for (int c = 0; c < ch; ++c) b.setSample(c, 0, 1.0f);
+                r.process(b);
+                for (int i = 0; i < 64 && done + i < n; ++i) out[(size_t)(done + i)] = b.getSample(0, i);
+            }
+            return out;
+        };
+        // RT60 by least squares over the 30 dB below the envelope peak
+        auto rt60 = [&](const std::vector<float>& x)
+        {
+            const int win = (int)(sr * 0.01);
+            std::vector<double> e;
+            for (size_t i = 0; i + (size_t)win < x.size(); i += (size_t)win)
+                e.push_back(dB(rmsOf(x, (int)i, (int)i + win)));
+            if (e.size() < 8) return 0.0;
+            const size_t pk = (size_t)(std::max_element(e.begin(), e.end()) - e.begin());
+            double sx = 0, sy = 0, sxx = 0, sxy = 0, n = 0;
+            for (size_t i = pk; i < e.size(); ++i)
+            {
+                if (e[i] > e[pk] - 5.0) continue;
+                if (e[i] < e[pk] - 35.0) break;
+                const double t = (double)i * 0.01;
+                sx += t; sy += e[i]; sxx += t * t; sxy += t * e[i]; n += 1.0;
+            }
+            if (n < 4.0) return 0.0;
+            const double slope = (n * sxy - sx * sy) / (n * sxx - sx * sx);
+            return slope < 0.0 ? -60.0 / slope : 0.0;
+        };
+        std::cout << "  pre-delay: wet onset and tail length (decay 2 s, size 0.7, damp 0.5)\n";
+        bool onsetOk = true, tailOk = true;
+        double rtRef = 0.0;
+        const float pds[] = { 0.0f, 20.0f, 50.0f, 100.0f };
+        for (int ch = 2; ch >= 1; --ch)
+        {
+            double tankOnset = 0.0;
+            for (int k = 0; k < 4; ++k)
+            {
+                auto out = impulseAt(pds[k], ch);
+                const double pk = peakOf(out, 0, (int)out.size());
+                int first = -1;
+                for (size_t i = 0; i < out.size(); ++i)
+                    if (std::abs(out[i]) >= pk * 0.02) { first = (int)i; break; }
+                const double ms = 1000.0 * first / sr;
+                if (k == 0) tankOnset = ms;
+                const double expect = tankOnset + (double)pds[k];
+                const double rt = rt60(out);
+                if (k == 0 && ch == 2) rtRef = rt;
+                std::cout << "    " << ch << "-ch pre-delay " << std::setw(6) << std::setprecision(1)
+                          << pds[k] << " ms -> onset " << std::setw(6) << first << " samples = "
+                          << std::setw(7) << std::setprecision(2) << ms << " ms (expected "
+                          << std::setprecision(2) << expect << "), RT60 " << std::setprecision(3)
+                          << rt << " s\n";
+                if (first < 0 || std::abs(ms - expect) > 0.2) onsetOk = false;
+                // the tail must not change length with the pre-delay: 5 % window
+                if (ch == 2 && (rt <= 0.0 || std::abs(rt - rtRef) > rtRef * 0.05)) tailOk = false;
+            }
+        }
+        check(onsetOk, "reverb: the wet onset is the pre-delay setting plus the tank's own onset, within 0.2 ms");
+        check(tailOk, "reverb: the tail length does not change with the pre-delay (within 5 %)");
+    }
+
+    {
+        // Automating the pre-delay must not disturb a tail that is already ringing.
+        // With the pre-delay behind the tank it did: the knob slid a read pointer
+        // back over the wet history and re-played the louder, earlier part of the
+        // decay, 3.66 dB away from the un-automated reference and 0.60 dB louder
+        // than the tail had been when the knob moved. In front of the tank the
+        // ringing tank cannot be reached.
+        auto run = [&](bool step)
+        {
+            agm::Reverb r;
+            r.prepare(sr, 512);
+            r.setEnabled(true);
+            r.setDamping(0.2f); r.setDecaySec(6.0f); r.setSize(0.7f);
+            r.setMix(1.0f); r.setWidth(1.0f); r.setPreDelayMs(0.0f);
+            AudioBuffer<float> b(2, 512);
+            std::vector<double> env;
+            uint32_t st = 7u;
+            for (int blk = 0; blk < 300; ++blk)
+            {
+                for (int i = 0; i < 512; ++i)
+                {
+                    st = st * 1664525u + 1013904223u;
+                    const float v = blk < 33 ? 0.4f * ((float)(st >> 8) / 8388608.0f - 1.0f) : 0.0f;
+                    b.setSample(0, i, v); b.setSample(1, i, v);
+                }
+                if (step && blk == 100) r.setPreDelayMs(100.0f);
+                r.process(b);
+                double a = 0.0;
+                for (int i = 0; i < 512; ++i) a += (double)b.getSample(0, i) * b.getSample(0, i);
+                env.push_back(std::sqrt(a / 512.0));
+            }
+            return env;
+        };
+        const auto ref = run(false), mod = run(true);
+        double worst = 0.0;
+        for (size_t b = 101; b < ref.size(); ++b)
+            worst = std::max(worst, std::abs(dB(std::max(mod[b], 1e-30)) - dB(std::max(ref[b], 1e-30))));
+        std::cout << "  pre-delay stepped 0 -> 100 ms 1.07 s into a decaying tail: tail envelope"
+                  << " moves " << std::setprecision(2) << worst << " dB (was 3.66 dB)\n";
+        check(worst < 0.5, "reverb: automating the pre-delay leaves a ringing tail untouched");
     }
 }
 
