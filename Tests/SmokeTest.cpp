@@ -1029,6 +1029,18 @@ static void fxSuite()
               "reverb tail falls >60 dB after its decay time and reaches exact silence");
         // RT60 per band (isolated reverb, decay 0.5 s, damp 0.5, size 0.7): slope of the
         // tail envelope between 50 ms and 350 ms after a 300 ms sine burst
+        // Least-squares slope of the tail envelope over the 40 dB below the start
+        // of the decay, in 20 ms steps. The previous version of this check
+        // took just two 50 ms points, 50-100 ms and 300-350 ms after the burst,
+        // and divided: 250 ms is a small window compared with a 2 s or 5 s decay,
+        // so what it actually measured was the modal beating in the band, not the
+        // decay rate. Measured both ways at 200 Hz, damping 0.5:
+        //     decay knob   2-point     least squares
+        //        0.5 s     0.498 s        0.501 s
+        //        2.0 s     2.272 s        1.904 s
+        //        5.0 s     7.889 s        4.330 s   <- 58 % high, and untested
+        // The fit tracks the knob at every setting; the two-point figure does not,
+        // so the estimator was replaced and a third decay setting added.
         auto rt60At = [](float freq, float decay, float damp)
         {
             agm::Reverb r; r.prepare(44100.0, 512); r.setEnabled(true); r.setMix(1.0f); r.setDecaySec(decay);
@@ -1036,7 +1048,7 @@ static void fxSuite()
             const double bandInc = 2.0 * MathConstants<double>::pi * freq / 44100.0;
             AudioBuffer<float> b(2, 512);
             std::vector<float> tail;
-            for (int blk = 0; blk < 300; ++blk)   // 3.5 s
+            for (int blk = 0; blk < 900; ++blk)   // 10.4 s: enough for a 5 s decay
             {
                 for (int i = 0; i < 512; ++i)
                 {
@@ -1047,18 +1059,31 @@ static void fxSuite()
                 r.process(b);
                 for (int i = 0; i < 512; ++i) tail.push_back(b.getSample(0, i));
             }
-            const int t0 = 22050 + 13230;
-            const float e1 = rmsRange(tail, t0 + 2205, t0 + 4410);      // 50-100 ms after the burst
-            const float e2 = rmsRange(tail, t0 + 13230, t0 + 15435);    // 300-350 ms after
-            const float slopeDbPerSec = (dbOf(e1) - dbOf(e2)) / 0.25f;
-            return slopeDbPerSec > 0.0f ? 60.0f / slopeDbPerSec : 1e9f;
+            const int t0 = 22050 + 13230, win = 882;   // 20 ms
+            const double ref = dbOf(rmsRange(tail, t0 + 2205, t0 + 2205 + win));
+            double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0, n = 0.0;
+            for (int i = t0 + 2205; i + win < (int)tail.size(); i += win)
+            {
+                const double v = dbOf(rmsRange(tail, i, i + win));
+                if (v < ref - 40.0) break;
+                const double t = (double)(i - t0) / 44100.0;
+                sx += t; sy += v; sxx += t * t; sxy += t * v; n += 1.0;
+            }
+            if (n < 4.0) return 1.0e9f;   // a 5 kHz tail at damping 0.5 falls 40 dB in 5 steps
+            const double den = n * sxx - sx * sx;
+            if (std::abs(den) < 1e-12) return 1.0e9f;
+            const double slope = (n * sxy - sx * sy) / den;      // dB per second
+            return slope < 0.0 ? (float)(-60.0 / slope) : 1.0e9f;
         };
         const float rtLo = rt60At(200.0f, 0.5f, 0.5f), rtMid = rt60At(1000.0f, 0.5f, 0.5f), rtHi = rt60At(5000.0f, 0.5f, 0.5f);
-        const float rtMid0 = rt60At(1000.0f, 0.5f, 0.0f), rtHi0 = rt60At(5000.0f, 0.5f, 0.0f), rtLo2 = rt60At(200.0f, 2.0f, 0.5f);
+        const float rtMid0 = rt60At(1000.0f, 0.5f, 0.0f), rtHi0 = rt60At(5000.0f, 0.5f, 0.0f);
+        const float rtLo2 = rt60At(200.0f, 2.0f, 0.5f), rtLo5 = rt60At(200.0f, 5.0f, 0.5f);
         std::cout << "  reverb RT60 @ decay 0.5 / damp 0.5: 200 Hz " << rtLo << " s, 1 kHz " << rtMid << " s, 5 kHz " << rtHi
-                  << " s; damp 0: 1 kHz " << rtMid0 << " s, 5 kHz " << rtHi0 << " s; decay 2.0 / damp 0.5 @200 Hz " << rtLo2 << " s\n";
+                  << " s; damp 0: 1 kHz " << rtMid0 << " s, 5 kHz " << rtHi0
+                  << " s; @200 Hz decay 2.0 " << rtLo2 << " s, decay 5.0 " << rtLo5 << " s\n";
         // The Decay knob is the low-frequency RT60; damping shortens the highs (that is its job).
-        check(std::abs(rtLo - 0.5f) < 0.075f && std::abs(rtLo2 - 2.0f) < 0.3f, "reverb Decay knob = RT60 at 200 Hz within 15 %");
+        check(std::abs(rtLo - 0.5f) < 0.075f && std::abs(rtLo2 - 2.0f) < 0.3f && std::abs(rtLo5 - 5.0f) < 0.75f,
+              "reverb Decay knob = RT60 at 200 Hz within 15 % at decay 0.5, 2.0 and 5.0");
         check(std::abs(rtMid0 - 0.5f) < 0.075f && std::abs(rtHi0 - 0.5f) < 0.075f, "reverb with Damp 0: RT60 flat within 15 % up to 5 kHz");
         check(rtHi < rtMid && rtMid < rtLo, "reverb Damp 0.5 shortens the highs progressively");
         h.setRaw("rvb_decay", 10.0f); h.setRaw("rvb_size", 1.0f);
