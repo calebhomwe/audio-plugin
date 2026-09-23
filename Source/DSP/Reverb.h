@@ -265,7 +265,11 @@ private:
             float dry = data[s];
             if (!std::isfinite(dry))
                 dry = 0.0f;
-            const float in = dry * inGain;
+            // Pre-delay sits in FRONT of the tank: it is the gap between the dry
+            // sound and the tank's onset, so it must delay what goes in. Behind the
+            // tank it re-times the ringing tail as well, which is audible the moment
+            // the knob is automated.
+            const float in = predelays[0].next(dry, preDelayF) * inGain;
             float acc = 0.0f;
             for (int i = 0; i < 8; ++i)
                 acc += combProcess(combs[i], in);
@@ -275,10 +279,9 @@ private:
             wet = allpassProcess(allpasses[2], wet);
             wet = allpassProcess(allpasses[3], wet);
             const float bg = bypass.next();
-            const float wetOut = predelays[0].next(wet, preDelayF);
             mixCur += (mixTarget - mixCur) * mixCoef;
             const float m = mixCur * bg;
-            data[s] = dry + (wetOut - dry) * m;
+            data[s] = dry + (wet - dry) * m;
         }
     }
 
@@ -294,8 +297,8 @@ private:
                 dryL = 0.0f;
             if (!std::isfinite(dryR))
                 dryR = 0.0f;
-            const float inL = dryL * inGain;
-            const float inR = dryR * inGain;
+            const float inL = predelays[0].next(dryL, preDelayF) * inGain;
+            const float inR = predelays[1].next(dryR, preDelayF) * inGain;
             float accL = 0.0f;
             float accR = 0.0f;
             for (int i = 0; i < 4; ++i)
@@ -309,12 +312,10 @@ private:
             const float mixL = w1 * wetL + w2 * wetR;
             const float mixR = w2 * wetL + w1 * wetR;
             const float bg = bypass.next();
-            const float wetOutL = predelays[0].next(mixL, preDelayF);
-            const float wetOutR = predelays[1].next(mixR, preDelayF);
             mixCur += (mixTarget - mixCur) * mixCoef;
             const float m = mixCur * bg;
-            L[s] = dryL + (wetOutL - dryL) * m;
-            R[s] = dryR + (wetOutR - dryR) * m;
+            L[s] = dryL + (mixL - dryL) * m;
+            R[s] = dryR + (mixR - dryR) * m;
         }
     }
 
