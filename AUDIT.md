@@ -19,7 +19,9 @@ cmake --build build -j3
 xvfb-run -a ./build/EditorProbe_artefacts/Release/EditorProbe           # editor wiring and readouts
 ```
 
-25 findings: 4 CRITICAL, 8 MAJOR, 13 MINOR, plus a COSMETIC list and an unproven list.
+26 findings: 5 CRITICAL, 8 MAJOR, 13 MINOR, plus a COSMETIC list and an unproven list.
+The wave-4 and wave-5 sections near the end carry the later work; C5 (wave 5, found by
+pluginval) is written up there.
 
 ---
 
@@ -866,10 +868,481 @@ the RT60 check gained a third setting at the same 15 % tolerance, and four check
 
 ---
 
+## Wave 5 — testing the tests, a defect pluginval found, and a third attempt at the reverb
+
+Four passes of "all green" rest on the assumption that these assertions would go red if the
+code broke. This pass checked that assumption one defect at a time, and it also had the first
+external validator run against the plugin.
+
+### C5 (NEW, CRITICAL) — `setStateInformation` does not restore the parameters. `Source/PluginProcessor.cpp:568`
+
+pluginval 1.0.4 at strictness 10, on the wave-4 head:
+
+```
+!!! Test 6 failed:  LP On    not restored on setStateInformation -- expected 0, actual 0.335409
+!!! Test 26 failed: Comp On  not restored on setStateInformation -- expected 1, actual 0.594589
+!!! Test 37 failed: Img Mono not restored on setStateInformation -- expected 0, actual 0.386431
+!!! Test 38 failed: Dly On   not restored on setStateInformation -- expected 0, actual 0.125261
+!!! Test 51 failed: Lim On   not restored on setStateInformation -- expected 1, actual 0.544729
+!!! Test 56 failed: Inst On  not restored on setStateInformation -- expected 1, actual 0.822784
+FAILED!!  6 tests failed, out of a total of 59
+```
+
+Which parameters fail depends on the random values pluginval draws, so a second run named a
+different subset (`Img On` 0.401123 and `Rvb On` 0.366734). Reproduced headlessly, it is not
+six parameters. It is **57 of 58**:
+
+```
+  all 58 parameters randomised with setValue() and restored: 57 not restored
+```
+
+**Mechanism.** `AudioProcessorValueTreeState` keeps its own copy of each value
+(`ParameterAdapter::unnormalisedValue`) and its `setDenormalisedValue` writes the parameter
+*only* when that copy disagrees with the tree. The copy is kept in step by
+`parameterValueChanged`, which fires from `setValueNotifyingHost` — and **not** from a bare
+`AudioProcessorParameter::setValue`. A host that writes a parameter that way notifies nobody,
+so the copy stays where it was; at the next `setStateInformation` the copy and the stored tree
+agree, APVTS writes nothing at all, and the parameter is left holding the host's value.
+
+Why pluginval saw only the booleans while the headless run sees 57 of 58 is **INFERRED**, not
+measured: the JUCE VST3 wrapper's `setValueAndNotifyIfChanged` returns early when the new value
+equals the parameter's current one, and for a two-step (on/off) parameter that is most of the
+time, so the plugin never moves, never notifies, and the host's cached 0.40 for a boolean is
+never corrected — while a float parameter does move, does notify, and keeps APVTS's copy in step.
+That reading of `juce_audio_plugin_client_VST3.cpp:829` fits both observations, but it was not
+instrumented; what is measured is the headless figure and pluginval's before and after.
+
+**FIXED.** `setStateInformation` writes every parameter from the tree after `replaceState`.
+By then APVTS has given every parameter a child filled with the value it kept, so the tree is
+the authority and an older state's missing parameters still stay where they were. The
+notification also corrects the host's own copy.
+
+```
+[PASS] state restoration: a parameter written with the bare setValue() path is restored exactly
+[PASS] state restoration: all parameters randomised with setValue() come back on setStateInformation
+pluginval --strictness-level 10   FAILURE (6 of 59)  ->  SUCCESS
+pluginval --strictness-level 5    SUCCESS            ->  SUCCESS
+```
+
+**Why four passes of green missed it.** Both existing round-trip assertions write through
+`setValueNotifyingHost`, which keeps the APVTS copy in step, so the stale-copy case never
+arose. `SmokeTest`'s also restores into a *fresh* processor, whose copy starts at the defaults;
+`AuditTest`'s 1000x round-trip restores into the same processor but restores the state it just
+saved, so there was nothing to disagree with. Neither ever used the path a host uses. The new
+assertions do exactly what pluginval does — one parameter at a time, then all 58 at once,
+written with `setValue()` — at a 1e-4 tolerance rather than pluginval's 0.1.
+
+**A second defect in our own probe, found on the way.** `Harness::setRaw/getRaw` converted
+through `NormalisableRange`, which does not snap to the parameter's legal values, instead of
+through `RangedAudioParameter`, which does. So the torture probe was writing 0.44 into an
+on/off parameter — a value the plugin's saved state cannot represent, because APVTS stores the
+snapped one — and then asserting that it survived a round trip. It did, only because nothing
+restored it. Both now go through the parameter.
+
+### The mutation audit
+
+Method: a compile-time switch, `-DMIXAGENT_MUTATE=n`, one defect per value of `n`, listed in
+`Source/DSP/Mutate.h`. Every block compiles out at `n = 0` and only the project's own
+translation units carry the define, so switching it does not rebuild JUCE. Run the whole table
+in one line:
+
+```sh
+tools/mutation_audit.sh                 # all of them; exit 1 if any survived
+tools/mutation_audit.sh 5 9 20          # just these
+```
+
+It is wired into CI as a manual `workflow_dispatch` job, not on the push path (twenty builds).
+
+First run: **19 of 20 caught, 1 survivor**. After the survivor produced a new assertion (below):
+**20 of 20 caught, 0 survivors.** The counts are assertions that went red, across
+`MixAgentSmokeTest` / `MixAgentAuditTest` / `MixAgentCharacterTest`.
+
+| n | defect injected | what had to fail | result |
+|---|---|---|---|
+| 1 | compressor gain computer neutralised — the stage passes audio through | its whole suite, and the dead-knob sweep | **caught**, 13 — incl. `DEAD: comp_enabled, comp_thresh, comp_ratio, comp_attack, comp_release, comp_knee, comp_mix` |
+| 2 | make-up gain folded back into the clamped reduction (**the defect that shipped**) | make-up gain | **caught**, 1 |
+| 3 | attack calibration removed (knob taken as the internal time constant) | printed-vs-measured attack | **caught**, 1 |
+| 4 | compressor threshold/ratio smoothing removed | the click hunt | **caught**, 1 — `CLICKS: comp_thresh, comp_ratio` |
+| 5 | limiter true-peak interpolator skipped, sample peaks only | the dBTP bounds | **caught**, 5 |
+| 6 | `Limiter::getLatencySamples()` returns 0 | measured == reported, at every setting | **caught**, 9 |
+| 7 | imager side gain frozen at unity — the Width knob does nothing | the 0/25/50/100/200 % table | **caught**, 4 — incl. `DEAD: img_enabled, img_width` |
+| 8 | imager takes the percentage as a raw side gain (**the defect that shipped**) | the same table | **caught**, 2 |
+| 9 | pre-delay moved back behind the tank (**the defect that shipped**) | the three pre-delay assertions | **caught**, 1 — only the automation one; the other two could not have failed, see below |
+| 10 | reverb denormal and non-finite flush removed | exact silence, NaN recovery | **caught**, 1 — the silence one; the NaN one could not, see below |
+| 11 | low tom rendered from the kick's voice spec | toms are not copies of the kick | **caught**, 1 |
+| 12 | PolyBLEP disabled, naive sawtooth | instrument fold-down aliasing | **caught**, 1 |
+| 13 | saturation oversampling bypassed (0 stages) | saturation fold-down aliasing | **caught**, 2 |
+| 14 | preset apply no longer starts from the factory defaults (**the defect that shipped**) | the 132 ordered preset pairs | **caught**, 2 |
+| 15 | in/out gain smoothing coefficient computed per block (**the defect that shipped**) | the click hunt | **caught**, 1 — `CLICKS: out_gain` |
+| 16 | delay read head degraded to nearest neighbour | delay wobble and distortion | **caught**, 3 |
+| 17 | EQ coefficient smoothing removed | the EQ zipper bound | **caught**, 1 |
+| 18 | comb bank halved back to 8 lines | reverb flatness over six seeds | **caught**, 3 |
+| 19 | `juce::ScopedNoDenormals` removed from `processBlock` | nothing named it | **SURVIVED** the first run; caught now, see below |
+| 20 | one parameter left out of the state restore | state restoration | **caught**, 2 |
+
+Four of the twenty are defects this repository actually shipped (2, 8, 14, 15) and one more is the
+one wave 4 fixed (9), so the table is not hypothetical: it re-injects the real history and watches
+the suite catch it.
+
+**The survivor, and it was the most useful result of the pass.** Removing
+`juce::ScopedNoDenormals` left all 220 assertions green, because denormals cost time and change
+no result. Timing it needs a reference workload with no denormals in it, and a quiet one will
+not do: with the guard off, a tail held "normal" by a -120 dBFS offset slowed down by 2x as
+well, because the filter and oversampler states ring down into the denormal range regardless —
+the ratio between the two hid the entire effect. Against 20 s of loud noise:
+
+```
+  guard on     decaying tail 1043 ms   loud noise 1068 ms   ratio 0.98
+  guard off    decaying tail 2060 ms   loud noise 1095 ms   ratio 1.88
+```
+
+So the guard is worth about 2x on a decaying tail, which is the state every reverb and delay
+tail in a session passes through. `MixAgentAuditTest` asserts the ratio at 1.5 and the mutation
+is caught. Twenty mutations, no survivors.
+
+**An assertion that claimed more than it measured.** Moving the pre-delay back behind the tank
+(mutation 9) left two of the three wave-4 pre-delay assertions green: "the wet onset is the
+pre-delay setting plus the tank's own onset" and "the tail length does not change with the
+pre-delay". They could not have failed. A pre-delay and a tank in series are linear and
+time-invariant, so their order cannot change the impulse response, and both of those numbers
+come from an impulse response. They prove the pre-delay is *accurate*; only the automation
+assertion proves where it *sits*. They are named for what they measure now.
+
+Two smaller off-target notes, left as they are with the reason stated:
+
+- `SmokeTest`'s "4x true-peak on sine bursts within 0.05 dB of the ceiling" stayed green with
+  the limiter's interpolator skipped (mutation 5). Its sine bursts have little inter-sample
+  excess at 7333 Hz; `MixAgentCharacterTest`'s three dBTP bounds, which use an independent 8x
+  measurement on a programme built to have inter-sample peaks, all failed. The bound is real,
+  it is just weaker than its name suggests.
+- Removing the reverb's denormal and non-finite flush (mutation 10) tripped the exact-silence
+  assertion but not the NaN-recovery one, because `processMono`/`processStereo` sanitise the dry
+  input before the tank, so a NaN from the host never reaches the flush. The flush inside
+  `combProcess` guards internally generated non-finite values, which cannot occur while the
+  feedback is clamped at 0.999 — genuinely unobservable, and not worth an assertion.
+
+### Bounds that were one draw of a distribution
+
+| Guard | Was | Six draws | Now |
+|---|---|---|---|
+| reverb flatness, stereo path | one seed, 3.11 dB, bound 4.0 | 3.11 / 3.69 / 2.21 / 3.43 / 1.76 / 2.03 dB | mean < 3.0 **and** worst < 4.0 |
+| reverb L/R correlation | one seed, 0.171, bound 0.8 | 0.057 / 0.171 / 0.448 / 0.246 / 0.016 / 0.378 | worst < 0.8 **and** mean < 0.5 |
+| drum hat HF/LF | one realisation, 17.6 dB, bound -6 | 12.7 .. 17.8 dB | worst of six |
+| drum snare centroid | one realisation, 936 Hz, bound 600 | 960 .. 1160 Hz | worst of six |
+| drum crash/snare centroid | one realisation, bound 1.3 | 7.9 .. 11.0 | worst of six |
+| drum crash -20 dB decay | one realisation, bound 150 ms | 1697 .. 1810 ms | worst of six |
+| drum hat velocity span | one realisation, 6.9 dB, bound 6.0 | 7.2 .. 9.0 dB | worst of six |
+
+**The correlation figure was never a measurement of anything.** The shipped bank's own
+seed-to-seed range is 0.016 to 0.448. Wave 4 recorded a single 0.171 and judged it against a
+0.163 "bar" from the previous bank — a 0.008 difference inside a 0.43-wide distribution. That
+comparison could not have decided anything, in either direction, and is withdrawn as evidence.
+
+The drum bounds all hold with wide margins on all six realisations, so nothing there was
+passing on luck; they are asserted on the worst of six regardless. The limiter's probes are
+sine, square and impulse programmes with no stochastic component at all, and the plugin has no
+dither stage, so there was nothing else of this species to re-measure.
+
+### N-tilt (LEFT OPEN after wave 4) — a different topology. **THIRD ATTEMPT, ALSO UNSUCCESSFUL. The comb bank stays.**
+
+Wave 4 established that the 3.2 dB tilt is a property of the topology rather than its tuning:
+no 8-line comb set beat 4.41 dB at any conditioning, the best-conditioned one was the worst,
+and the diffusers were proved exact. So this pass built the other standard topology — a
+feedback delay network — and measured both against the same probes, the same six seeds and the
+same settings. `Tests/ReverbProbe.cpp` is that instrument, and it measures both tanks in one
+run whichever one is selected:
+
+```sh
+./build/ReverbProbe_artefacts/Release/ReverbProbe            # both
+cmake -S . -B build -DMIXAGENT_REVERB_FDN=ON                 # make the FDN the plugin's tank
+```
+
+The FDN: 16 mutually-prime lines over the comb bank's own 1:2 range, recirculated through a
+16-point Hadamard scaled by 1/sqrt(16) — exactly orthogonal, 64 adds per sample and no
+multiplies — one damping one-pole per line, two unity-gain Schroeder allpasses per channel in
+front, and four mutually orthogonal Walsh sign patterns for the input and output taps. Its wet
+level is calibrated to the comb bank's within 0.1 dB so the two can be compared without a level
+change.
+
+```
+                                        comb bank (ships)        FDN
+  band spread, stereo path, 6 seeds     2.71 (1.76..3.69) dB     5.05 (3.71..6.55) dB
+  band spread, mono path,   6 seeds     4.05 (3.16..5.48) dB     4.57 (3.31..5.35) dB
+  |L/R correlation|,        6 seeds     0.219 (0.016..0.448)     0.103 (0.026..0.181)
+  per-octave RT60, 125 Hz..8 kHz        2.18 .. 1.41 s           2.08 .. 1.40 s
+  RT60 spread across octaves            0.771 s = 3.79 dB        0.679 s = 3.43 dB
+  modal ringing 40-500 Hz               +30.90 dB over the mean  +29.47 dB
+  RT60 vs the Decay knob                monotonic, 0.54..10.43 s monotonic, 0.54..10.43 s
+  RT60 vs the Size knob                 invariant within 8.2 %   invariant within 9.5 %
+  tail reaches exactly 0.0              yes, after 21.9 s        yes, after 20.9 s
+  60 s of full-scale square, decay 10   all finite, peak -0.30   all finite, peak -1.15 dBFS
+  wet level, stereo / mono              -37.20 / -40.27 dBFS     -37.22 / -40.18 dBFS
+  CPU, 48 kHz, blocks of 512            0.29 %                   0.63 % of one core
+```
+
+Eight FDN configurations were measured, six-seed stereo band spread each time:
+
+```
+  Walsh taps, 1:2 span, no diffusion              4.77 dB mean (2.13..8.35)
+  Walsh taps, 1:2 span, input diffusion           5.05 dB mean (3.71..6.55)   <- kept
+  Walsh taps, 1:4 span, input diffusion           5.25 dB mean (3.38..7.03)
+  Walsh taps, 1:4 span, no diffusion              5.26 dB mean (2.32..6.45)
+  split halves in and out                         7.10 dB mean (5.42..9.04)
+  split halves in, even/odd out                   7.43 dB mean (5.91..9.68)
+  even/odd in, split halves out                   7.10 dB mean (5.42..9.04)
+  unbalanced sign masks (4 of 16 negative)        6.27 dB mean (5.00..7.72)
+```
+
+**One number could not be reproduced, and it is the CPU figure.** Wave 4 recorded the reverb
+stage at 0.76-0.88 % of a core at 48 kHz with blocks of 512. `ReverbProbe`, timing the tank alone
+over 20 s of audio and taking the best of three, reads 0.27-0.51 % for the same comb bank across
+runs on this machine - which had three other builds running on its four cores throughout, so the
+absolute figures move by 2x between runs and are not worth quoting to two digits. The **ratio**
+measured in one run is stable and is what the comparison rests on: the FDN costs **2.2x** the comb
+bank (0.29 % against 0.63 % in the run tabulated above, 0.61 % against 0.29 % and 0.80 % against
+0.51 % in two others). Wave 4's absolute figure is neither confirmed nor contradicted; a different
+instrument on a different machine.
+
+Two things worth recording from the losing attempts. The split-half mixings are much worse
+because only half the lines get direct input and their first echoes arrive in phase. And the
+Walsh taps sum to zero, which costs low frequencies: the Walsh functions are the Hadamard
+matrix's own eigenvectors, so the modes with every line in phase — the low ones — are cancelled
+exactly by a zero-sum tap, and the 125 Hz band measured 4.5 dB down on the six-seed mean.
+Unbalancing the signs fixes that band and colours the others worse.
+
+**Judgement.** The bar was: beat the comb bank on spread without regressing correlation or
+mono-sum, judged against distributions. The FDN loses on spread by 2.3 dB of mean and 2.9 dB of
+worst case, and its mono path is 0.5 dB worse too. It wins on correlation, on modal ringing and
+on per-octave RT60 spread, and costs 2.2x the CPU. None of that buys back the number the whole
+exercise is about, so **the comb bank stays**. The FDN stays behind `-DMIXAGENT_REVERB_FDN=ON`
+with these measurements; built that way, the suite fails exactly the two reverb flatness
+assertions and passes the other 225.
+
+Three attempts have now been made on this tilt — two comb-set rebuilds in wave 4 and a change
+of topology here — and the honest conclusion is that **2.7 dB of six-seed mean spread is as
+flat as this architecture gets**. A materially flatter reverb means a different design
+(nested allpasses in the Dattorro manner, or a much larger network), which is a new reverb
+rather than a fix to this one.
+
+### N8-floor (LEFT OPEN after wave 4) — "the attack cannot be honoured below 2 ms". **WITHDRAWN: that was the probe.**
+
+Wave 4 recorded a roughly 2 ms floor on the Attack knob and attributed it to the detector's
+8 ms RMS branch. Reproducing it showed where it came from: the probe read the output peak over
+a **2 ms** window and started 2 ms after the step, so 2.00 ms was the smallest number it could
+print for any setting and any RMS window. One cycle of the 1 kHz probe is enough:
+
+```
+  knob   0.1   0.5   1.0   2.0   3.0   5.0  10.0  25.0  50.0 100.0 ms
+  t63    1.00* 1.00* 1.00* 1.33  2.83  4.83 10.33 23.83 48.83 98.83 ms   (* probe resolution)
+```
+
+The knob is honoured below 2 ms already. The proposed change — a shorter RMS window — was
+measured anyway, with `-DMIXAGENT_COMP_RMS_MS=n`:
+
+```
+  window    t63 at a 3 ms knob    square vs sine (crest independence)
+  8 ms      2.83 ms               2.13 dB
+  4 ms      2.33 ms               2.02 dB
+  3 ms      2.33 ms               1.95 dB
+  2 ms      1.92 ms               1.81 dB
+```
+
+It buys 0.5-0.9 ms in the middle of the range, costs a refit of the knob calibration (which was
+fitted against the 8 ms branch), and moves the detector further from the RMS behaviour the
+branch exists for. With no floor to lift, that is not a trade worth making: **the window stays
+at 8 ms**, and both columns are recorded here rather than in a decision. The corrected probe
+also tightened the assertion — below 3 ms it asserted only "faster than 2.25 ms", which the old
+probe could not have failed, and it now asserts the measured attack is no slower than the knob.
+
+### Behaviour changes
+
+- **Loading a saved session now applies every parameter.** This is the C5 fix and it is a
+  behaviour change: a session saved by a build with the defect may hold, for an on/off
+  parameter, a raw value like 0.40 that the plugin was reading as "off". It now loads as
+  exactly off. The audible state is the same in every case — the snap always agrees with the
+  `>= 0.5` test the DSP used — but a host reading the parameter back will see 0 where it
+  previously saw 0.40.
+- **The reverb is unchanged.** The comb bank ships, so no preset's voicing moves. Had the FDN
+  shipped it would have. Three of the twelve factory presets engage the reverb — 2 "Vocal
+  Presence" (mix 0.15, decay 2.0 s), 4 "Wide & Spacey" (size 0.85, decay 4.0 s, mix 0.35,
+  pre-delay 40 ms) and 9 "Trap: Plugg Pad" (size 0.85, decay 5.0 s, mix 0.45, pre-delay 35 ms) —
+  and each would have been rendered by a different room at the same settings. The other nine
+  leave `rvb_enabled` at its default of off, so they are unaffected by either tank. The wet level
+  is matched within 0.1 dB either way, so switching between the two is a change of character and
+  not of balance.
+- Nothing else changed in the DSP. No parameter ID, range, default or version hint moved.
+
+### Wave-5 verification
+
+```
+ctest --test-dir build --output-on-failure        4/4 passed, 40.40 s
+  MixAgentSmokeTest      153/153  (was 151)    MixAgentCharacterTest   50/50  (was 46)
+  MixAgentAuditTest       12/12   (was 11)     EditorProbe             12/12
+total allocations inside processBlock across 24 rate/block combinations: 0
+latency (sat off): reported 193 measured 193 | (sat on): reported 193 measured 193
+  plus limiter engaged and at 96 kHz - reported == measured at every setting
+decaying tail 1099.3 ms vs loud noise 1087.1 ms, ratio 1.011 (denormal guard engaged)
+strict warnings, the exact CI step, on all seven of our own translation units:
+  -Wall -Wextra -Wshadow -Wnon-virtual-dtor -Woverloaded-virtual -Wunused -Werror   0 warnings
+tools/mutation_audit.sh                           20 of 20 caught, 0 survived
+pluginval --strictness-level 5  --validate ...    SUCCESS
+pluginval --strictness-level 10 --validate ...    SUCCESS   (was FAILURE, 6 of 59)
+ASAN_UBSAN_PLACEHOLDER
+```
+
+220 -> 227 checks. **No assertion was loosened.** Three were tightened: the reverb flatness guard
+now has to hold on a six-seed mean of 3.0 dB as well as a 4.0 dB worst case, the compressor's
+sub-3 ms attack bound went from a fixed 2.25 ms (which the old probe could not have failed) to the
+knob value, and the drum bounds are asserted on the worst of six noise realisations instead of
+one. Seven checks were added.
+
+pluginval 1.0.4 at revision `4c5adc2`, built without Steinberg's embedded VST3 validator, so its
+own "vst3 validator" group reports as skipped and the other 58 checks run:
+
+```sh
+xvfb-run -a .../pluginval --strictness-level 10 --timeout-ms 900000   --validate build/MixAgent_artefacts/Release/VST3/MixAgent.vst3
+```
+
+**CI.** GitHub Actions was unavailable for part of this pass: every job failed with zero steps in
+two to three seconds, with the check-run annotation "The job was not started because recent
+account payments have failed or your spending limit needs to be increased". That is an account
+billing state, not a workflow defect - `if`-gated jobs correctly skipped, which costs no runner,
+and the workflow parses. It was resolved by the owner during the pass. CI_STATUS_PLACEHOLDER
+Nothing in this section depends on CI: every number above was produced locally by the command
+printed beside it.
+### What the survivors exposed, and what closes each
+
+**1. Every hand-built descriptor in the suite could disagree with the shipped
+table, and nothing would notice.** This is the `eqDesc()` species and the
+highest-severity thing available here, so it is closed generically rather than one
+rig at a time. **Group 42** validates all twelve `ProductDesc`s this suite builds by
+hand — `comp76Desc`, `eqDesc`, `limDesc`, `satDesc`, `delayDesc`, `verbDesc`,
+`widDesc`, `optoDesc`, `preDesc`, `mbDesc`, `xtDesc`, `deEssDesc` — against the 13
+shipped tables:
+
+* the id is a parameter of some shipped product (a rig cannot probe an id nothing
+  ships);
+* the concrete JUCE parameter class `FVGenericProcessor` resolves for it here is
+  the class it resolves in the product — which is exactly what `stepped` + the
+  choice list decide, and exactly what the `eqT0` bug broke;
+* the choice list and the display format match;
+* the range is one a shipped product actually ships (ranges may legitimately
+  differ *between products* — Channel's preamp DRIVE tops out at 20 dB where
+  FV-Preamp's reaches 24 — so the check is membership, not equality);
+* the default is inside the range, and a valid index when stepped;
+* **every engine in the rig's chain is handed every id it reads.**
+
+That last list is not hand-written. `tools/scripts/gen_products.py` scrapes the
+`P ("id")` literals out of `src/Shared/FVEngines.h` per engine and emits
+`src/Shared/FVEngineParams.h`, so it cannot drift from the code it describes, and
+CI's existing generator-drift step diffs it. `fv::ParamSource` answers 0.0 for an
+id a table does not have and says nothing about it, so the same completeness check
+runs over the 13 shipped products too: an engine quietly running on zeros is the
+same defect wearing a product's clothes.
+
+All 14 checks pass on the current tables — the descriptors agree today. The point
+is that they are now *held* to agreeing.
+
+**2. The de-esser's defining property had no assertion at all.** `fv_audit`
+measured it and printed a number, which is a report, not a gate. Bypassing the
+band split — the exact defect wave 3 found shipped, a full-band compressor with a
+300 Hz sidechain high-pass — left all 474 checks green, and so did making the
+detector full-band. **Group 43** measures both, relative to the same signal through
+the same crossover with the reduction switched off (so it measures the reduction
+and not the crossover's response at the probe frequency):
+
+| | measured |
+|---|---|
+| 10 kHz with the de-esser reducing hard | **-18.43 dB** |
+| the 300 Hz body underneath it | **-0.00 dB** |
+| a 12 kHz tone at -48 dBFS under a hot 80 Hz note vs a quiet one | **+0.00 dB** |
+
+**3. Comp76's INPUT could read backwards and only unrelated products noticed.**
+The circuit has no threshold control: INPUT drives the stage, so turning it up must
+make the output louder and the reduction deeper. The suite measured the ratio
+(invariant to a sign error in the drive) and the attack, and the inverted-INPUT
+mutation was killed only by other products' NaN/recovery bounds — an off-target
+kill. **Group 44**: INPUT 0 -> +12 dB gives **-15.32 -> -11.44 dB out** and
+**-0.26 -> -8.39 dB of gain reduction**.
+
+**4. The +60 dBFS input clamp was never exercised.** Group 16's hottest probe is
++40 dBFS, inside the clamp, so removing the clamp changed nothing the suite
+measured. **Group 45** feeds ±1e38 (+760 dBFS) to all 13 products for 20 blocks and
+then requires a clean 440 Hz tone afterwards.
+
+**5. Group 33's bypass-click probe could not have caught a missing crossfade.**
+This one is the clearest "passing on luck" finding of the pass, and it is worse
+than luck — it was structural. A 1 kHz sine driven hard into the valve stage comes
+out as a near-square whose own sample-to-sample steps are **0.306**, while the
+entire difference between the processed and the dry level is **0.14**: the
+switching step was under the signal's own slope *at every phase*. And 1 kHz in
+64-sample blocks put block boundary 375 at phase 2π·500, exactly a zero crossing of
+the test tone, where the two signals being crossfaded are both zero. The probe is
+**100 Hz** now, with PRE OUT at +6 dB so the two paths really differ in level, and
+the toggle offset is swept over eight consecutive blocks. The crossfade measures
+**1.02x**; with it removed, the suite goes red.
+
+Getting that mutation right also turned up a **real defect in the crossfade
+itself**. The fade stepped toward the target and clamped to [0,1]; once it arrived
+mid-block, the next sample found `target < bypassMix` and stepped back down, so the
+rest of that block alternated between the target and one step short of it — a
+Nyquist-rate ripple of 1/480 of the difference between the processed and dry
+signals, every time a fade finished inside a block. It approaches the target and
+stops there now. (The first attempt at the mutation, setting the step to 1.0, did
+not switch in one sample at all: it made `bypassMix` alternate 1, 0, 1, 0 forever
+through that same overshoot branch, which is the same mechanism at 480x the
+amplitude — and the suite stayed green because that alternation is present in the
+"steady" window too, so the ratio it measures is 1.00x. **My mutation was wrong
+before the test was.**)
+
+**6. Group 37 cannot see a frozen gain smoother.** It sweeps each parameter across
+its range in 200 block-sized steps — 0.5 % of the range per block, far too small to
+show against the signal's own slope. Setting `fv::SmoothGain`'s time constant to
+zero, so every smoothed level knob jumps in one sample, left all 474 checks green.
+**Group 47** measures the mechanism instead: step a level control across its whole
+range at ONE block boundary and time how long the output takes to arrive.
+
+| control | time to within 10 % of the new level |
+|---|---|
+| `comp76Desc c7_output` -20 -> +20 dB | 38.7 ms |
+| `deEssDesc c7_output` -20 -> +20 dB | 38.7 ms |
+| `preDesc pa_output` -12 -> +12 dB | 38.7 ms |
+| `preDesc pa_drive` 0 -> +24 dB | 34.7 ms |
+| `satDesc st_output` -24 -> +24 dB | 42.7 ms |
+| `optoDesc op_gain` -12 -> +12 dB | 38.7 ms |
+
+Writing it found that **`st_output` and `op_gain` really did step** — they were
+applied straight from the parameter — so both go through `fv::SmoothGain` now. It
+snaps on its first block, so a static setting is bit-identical and both golden
+hashes are unchanged. MIX controls are NOT covered by this group and still step;
+that is recorded below as open.
+
+**7. Denormal protection is genuinely unobservable in this suite's terms.**
+Replacing `juce::ScopedNoDenormals noDenormals;` with an immediately-destroyed
+temporary — the classic no-op form of the bug — leaves the suite green and there is
+no honest assertion to add. Denormals change *timing*, not output samples, and the
+block-time budget (group 6) has about 40x of headroom at 48 kHz, so a denormal
+slowdown cannot trip it without being catastrophic. The guard that matters is
+reading the line, and it is one line. Left open, stated.
+
+**Two of the eight first-sweep survivors were my mutations being wrong, not the
+suite's fault**, and both are recorded because the distinction matters:
+
+* `crosstalk-flat` and `deesser-split-bypassed` patched only the LEFT channel, and
+  the tests measure the right one. Both cover both channels now.
+* `reverb-damp-unclamped` removed the DAMP ceiling but left the per-comb spread, so
+  only half the comb bank froze and the RT60 assertion still passed. It removes
+  both now, which reproduces the wave-3 defect exactly, and the suite catches it.
+
+### The mutation table
+
+---
+
 ## Summary
 
 | # | Severity | Finding | Status |
 |---|---|---|---|
+| C5 | CRITICAL | `setStateInformation` restored 1 of 58 parameters when the host had written them without notifying | FIXED (wave 5) — found by pluginval, strictness 10 FAILURE -> SUCCESS |
 | C1 | CRITICAL | Compressor make-up gain unreachable | FIXED — 0.00 → 3.00/6.00/12.00/24.00 dB |
 | C2 | CRITICAL | Img Width saturates at 2 %; 100 % means 200 % | FIXED — side gain now tracks the percentage |
 | C3 | CRITICAL | In/Out gain smoothing ~blockSize times too fast | FIXED — per-sample coefficient |
@@ -898,6 +1371,12 @@ the RT60 check gained a third setting at the same 15 % tolerance, and four check
 
 New in wave 4: the reverb's spectral tilt (a comb-bank rebuild, 4.28 → 2.35 dB on a six-seed
 mean), and a defect in `SmokeTest`'s own RT60 estimator that read 58 % high at a 5 s decay.
+
+New in wave 5: C5 above; twenty mutations with no survivors; the denormal guard shown to be
+worth 2x on a decaying tail; an FDN reverb measured against the comb bank over six seeds and
+rejected on the numbers; and two of the repository's own instruments found wrong — the probe
+that put a 2 ms floor on the compressor's attack, and the harness call that wrote illegal values
+into on/off parameters.
 
 Test counts: 151 → 151 (`MixAgentSmokeTest`), 0 → 11 (`MixAgentAuditTest`),
 0 → 46 (`MixAgentCharacterTest`), 9 → 12 (`EditorProbe`). **160 → 220 checks** in total,

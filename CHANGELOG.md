@@ -1,5 +1,85 @@
 # Changelog
 
+## 2026-09-28 (wave 5) — proving the tests can fail, and the first external validator
+
+Two halves. First, every substantive assertion group was shown to go red for a deliberate
+defect in the code it covers — twenty of them, one at a time. Second, pluginval was run against
+the VST3 for the first time and found a state-restoration defect that four passes of these tests
+had missed. Full workings in `AUDIT.md` under "Wave 5".
+
+### Fixed
+
+- **`setStateInformation` now writes every parameter from the restored tree**
+  (`Source/PluginProcessor.cpp`). pluginval at strictness 10 reported six on/off parameters
+  "not restored", holding values like 0.401 that an on/off parameter should never hold.
+  Headless reproduction put the real figure at **57 of 58 parameters**. `AudioProcessorValueTreeState`
+  writes a parameter only when its own cached copy disagrees with the tree, and that copy is
+  updated by `setValueNotifyingHost` but **not** by the bare `AudioProcessorParameter::setValue`
+  a host uses for automation — so after such a write the copy and the tree agree while the
+  parameter does not, and the restore does nothing. pluginval: strictness 10 **FAILURE (6 of 59)
+  → SUCCESS**; strictness 5 SUCCESS → SUCCESS. The audible state was never wrong (the DSP reads
+  these through a `>= 0.5` test), but a host reading a parameter back after a session load saw
+  its own stale value.
+- **`Harness::setRaw/getRaw` convert through the parameter, not through its range**
+  (`Tests/TestSupport.h`). `NormalisableRange::convertTo0to1` does not snap to a parameter's
+  legal values; `RangedAudioParameter::convertTo0to1` does. The torture probe was writing 0.44
+  into an on/off parameter — a value the saved state cannot represent — and then asserting it
+  survived a round trip.
+
+### Measured and deliberately NOT changed
+
+- **The reverb keeps its comb bank; the FDN built to replace it is worse where it matters.**
+  A feedback delay network (16 mutually-prime lines, 16-point Hadamard feedback, per-line
+  damping, Walsh input/output taps, input diffusion) was built and measured against the comb
+  bank over the same six seeds. Band spread **2.71 dB mean (1.76–3.69) for the comb bank against
+  5.05 dB (3.71–6.55) for the FDN**; the mono path is 0.5 dB worse too. The FDN is better on
+  |L/R correlation| (0.103 against 0.219), on modal ringing (+29.5 dB against +30.9) and on
+  per-octave RT60 spread (3.43 dB against 3.79), and costs 2.2x the CPU. Eight FDN
+  configurations were measured and the best mean any reached was 4.77 dB. It stays behind
+  `-DMIXAGENT_REVERB_FDN=ON` with its numbers recorded, wet level matched to the comb bank
+  within 0.1 dB. Three factory presets engage the reverb (2, 4 and 9); had the FDN shipped, those
+  three would have been voiced differently, and the other nine leave the reverb off. **Three attempts have now been made on this spectral tilt** — two comb-set
+  rebuilds in wave 4 and a change of topology here — and 2.7 dB of six-seed mean spread is as
+  flat as this architecture gets.
+- **The compressor's RMS window stays at 8 ms, because the floor it was blamed for was the
+  probe's.** Wave 4 recorded that the Attack knob cannot be honoured below about 2 ms. The test
+  read the output peak over a 2 ms window starting 2 ms after the step, so 2.00 ms was the
+  smallest number it could print for any setting. Measured with a one-cycle window, the shipped
+  8 ms branch reaches **1.33 ms at a 2 ms knob**. Shortening the window to 4 / 3 / 2 ms was
+  measured anyway: the 3 ms knob lands at 2.33 / 2.33 / 1.92 ms and the crest-independence
+  figure moves 2.13 → 2.02 / 1.95 / 1.81 dB. With no floor to lift, not a trade worth a refit
+  of the calibration.
+- **Wave 4's L/R correlation comparison is withdrawn as evidence.** It judged a single 0.171
+  against a 0.163 bar. The shipped bank's own seed-to-seed range is **0.016 to 0.448**, so a
+  0.008 difference inside a 0.43-wide distribution could not have decided anything either way.
+
+### Tests
+
+- **A mutation harness**: `-DMIXAGENT_MUTATE=n` compiles exactly one deliberate defect into the
+  DSP (`Source/DSP/Mutate.h` lists all twenty), and `tools/mutation_audit.sh` walks the table,
+  building and running the three console targets for each and reporting any the suite failed to
+  catch. Every block compiles out at `n = 0`. Wired into CI as a manual job.
+- **Twenty mutations, one survivor, now zero.** The survivor was removing
+  `juce::ScopedNoDenormals`: denormals cost time and change no result. Timed against a
+  denormal-free reference, the guard is worth **2x** on a decaying tail (tail 1043 ms vs loud
+  noise 1068 ms with the guard, 2060 ms vs 1095 ms without), and `MixAgentAuditTest` now asserts
+  that ratio.
+- **An assertion that claimed more than it measured.** Moving the pre-delay back behind the tank
+  left two of wave 4's three pre-delay assertions green — and they could not have failed, since
+  a pre-delay and a tank in series commute and both numbers come from an impulse response. They
+  are named for what they measure now; only the automation assertion proves the position.
+- **Stochastic bounds re-stated against distributions.** The reverb's flatness and correlation
+  guards assert the six-seed mean and worst case instead of one draw, and the noise-dependent
+  drum bounds (hat HF/LF, snare centroid, crash brightness and length, velocity span) assert the
+  worst of six noise realisations. All the drum margins were wide; nothing there was passing on
+  luck.
+- **220 → 227 checks**, 4/4 ctest targets pass. Allocations inside `processBlock` across 24
+  rate/block combinations: **0**. Reported latency equals measured at every setting. No
+  assertion was loosened: the compressor's sub-3 ms attack bound tightened from a fixed 2.25 ms
+  to the knob value, and seven checks were added.
+- A pluginval job and a mutation-audit job were added to CI as manual `workflow_dispatch` runs,
+  so neither lengthens a push.
+
 ## 2026-09-23 (wave 4) — closing what wave 3 left open
 
 Four items. Each started by reproducing wave 3's number before anything changed, and two of
