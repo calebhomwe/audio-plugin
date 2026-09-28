@@ -1212,6 +1212,63 @@ static void stateSuite()
         check(fin, "processor renders after state load");
     }
 
+    // What pluginval's "Plugin state restoration" group does, and what five passes
+    // of our own round-trip assertions could not see: write a parameter through
+    // the BARE AudioProcessorParameter::setValue() path. That is how a host writes
+    // automation, and it notifies nobody - so APVTS's cached copy of the value
+    // does not move, and on the next setStateInformation the cache and the stored
+    // tree agree while the parameter itself still holds the host's value. The
+    // parameter is then silently not restored. Our own tests all wrote through
+    // setValueNotifyingHost (which keeps the cache in step) and compared against a
+    // FRESH processor, so the stale-cache case never arose.
+    {
+        Harness h;
+        std::mt19937 rng(20260928u);
+        std::uniform_real_distribution<float> uni(0.0f, 1.0f);
+
+        // (a) one parameter at a time, exactly pluginval's loop
+        auto params = h.proc->getParameters();
+        MemoryBlock saved;
+        h.proc->getStateInformation(saved);
+        int worstIdx = -1;
+        float worstErr = 0.0f;
+        for (auto* p : params)
+        {
+            const float original = p->getValue();
+            p->setValue(uni(rng));
+            h.proc->setStateInformation(saved.getData(), (int)saved.getSize());
+            const float err = std::abs(p->getValue() - original);
+            if (err > worstErr) { worstErr = err; worstIdx = params.indexOf(p); }
+        }
+        if (worstIdx >= 0 && worstErr > 1.0e-4f)
+            std::cout << "  worst single-parameter restore error: " << params[worstIdx]->getName(64)
+                      << " off by " << worstErr << "\n";
+        check(worstErr <= 1.0e-4f,
+              "state restoration: a parameter written with the bare setValue() path is restored exactly "
+              "(pluginval's Plugin state restoration check)");
+
+        // (b) every parameter at once, then one restore
+        std::vector<float> want;
+        want.reserve((size_t)params.size());
+        for (auto* p : params) want.push_back(p->getValue());
+        MemoryBlock saved2;
+        h.proc->getStateInformation(saved2);
+        for (auto* p : params) p->setValue(uni(rng));
+        h.proc->setStateInformation(saved2.getData(), (int)saved2.getSize());
+        int bad = 0;
+        for (int i = 0; i < params.size(); ++i)
+            if (std::abs(params[i]->getValue() - want[(size_t)i]) > 1.0e-4f)
+            {
+                ++bad;
+                if (bad <= 5)
+                    std::cout << "  not restored: " << params[i]->getName(64) << " wanted " << want[(size_t)i]
+                              << " got " << params[i]->getValue() << "\n";
+            }
+        std::cout << "  all " << params.size() << " parameters randomised with setValue() and restored: "
+                  << bad << " not restored\n";
+        check(bad == 0, "state restoration: all parameters randomised with setValue() come back on setStateInformation");
+    }
+
     // garbage / empty / truncated / wrong-tag / older state must not crash and must not half-apply
     {
         Harness h;

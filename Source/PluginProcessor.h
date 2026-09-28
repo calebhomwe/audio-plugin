@@ -111,6 +111,7 @@ private:
 
     void handleMidiEvent(const juce::MidiMessage& msg);
     void handleAsyncUpdate() override;   // syncs a MIDI program change into the inst_program parameter
+    void forceParametersFromState();     // writes every parameter from the restored tree (see the .cpp)
     std::atomic<int> midiProgramChange { -1 };
     void renderSynthBus(juce::AudioBuffer<float>& buffer, int numCh, int start, int num);
     void drainUiNotes();

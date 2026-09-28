@@ -338,7 +338,8 @@ static void tortureSuite()
         }
         for (const auto& pi : params)
             if (std::abs(h.getRaw(pi.id.toRawUTF8()) - want[pi.id]) > 1e-4f * std::max(1.0f, std::abs(want[pi.id])))
-            { exact = false; std::cout << "  drifted: " << pi.id << "\n"; }
+            { exact = false; std::cout << "  drifted: " << pi.id << " wanted " << want[pi.id]
+                                       << " got " << h.getRaw(pi.id.toRawUTF8()) << "\n"; }
         check(exact, "1000x state round-trip is byte-stable and every parameter is unchanged");
     }
 

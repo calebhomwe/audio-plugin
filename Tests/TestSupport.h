@@ -104,16 +104,21 @@ struct Harness
 
     AudioProcessorValueTreeState& apvts() { return proc->getAPVTS(); }
 
+    // RangedAudioParameter::convertTo0to1 / convertFrom0to1 snap to the parameter's
+    // own legal values; NormalisableRange's do not. Using the range's versions let
+    // the probes write 0.44 into an on/off parameter - a value the plugin's saved
+    // state cannot represent, because APVTS stores the snapped value - and then
+    // assert that it survived a round trip. Go through the parameter.
     float getRaw(const char* id)
     {
         auto* p = dynamic_cast<RangedAudioParameter*>(apvts().getParameter(id));
-        return p != nullptr ? p->getNormalisableRange().convertFrom0to1(p->getValue()) : 0.0f;
+        return p != nullptr ? p->convertFrom0to1(p->getValue()) : 0.0f;
     }
 
     void setRaw(const char* id, float raw)
     {
         if (auto* p = dynamic_cast<RangedAudioParameter*>(apvts().getParameter(id)))
-            p->setValueNotifyingHost(p->getNormalisableRange().convertTo0to1(raw));
+            p->setValueNotifyingHost(p->convertTo0to1(raw));
     }
     void setOn(const char* id, bool on) { setRaw(id, on ? 1.0f : 0.0f); }
 

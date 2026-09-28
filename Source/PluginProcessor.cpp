@@ -385,7 +385,9 @@ void MixAgentAudioProcessor::renderSynthBus(juce::AudioBuffer<float>& buffer, in
 
 void MixAgentAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
-    juce::ScopedNoDenormals noDenormals;
+#if !AGM_MUTATION(19)
+    juce::ScopedNoDenormals noDenormals;   // mutation 19 removes this
+#endif
     const int numSamples = buffer.getNumSamples();
     const int numCh = buffer.getNumChannels();
     if (numSamples == 0 || numCh == 0)
@@ -410,7 +412,12 @@ void MixAgentAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     // Per-SAMPLE step for a 10 ms ramp. This used to divide by the block length
     // instead of by one sample and was then applied once per sample, so the ramp
     // ran roughly blockSize times too fast and gain automation stepped.
+#if AGM_MUTATION(15)
+    // mutation 15: the defect that shipped - a per-block coefficient applied per sample
+    const float gainCoef = 1.0f - std::exp(-(float)numSamples / (0.010f * (float)sampleRate));
+#else
     const float gainCoef = 1.0f - std::exp(-1.0f / (0.010f * (float)sampleRate));
+#endif
     const float inTarget = agm::dbToGain(inGainDb);
     const float outTarget = agm::dbToGain(outGainDb);
 
@@ -566,7 +573,41 @@ void MixAgentAudioProcessor::setStateInformation(const void* data, int sizeInByt
             // Older states carry no hostProgram attribute: keep preset 0 as before.
             currentProgram = juce::jlimit(0, kPresetCount - 1, xml->getIntAttribute("hostProgram", 0));
             apvts.replaceState(juce::ValueTree::fromXml(*xml));
+            forceParametersFromState();
         }
+}
+
+// APVTS keeps its own copy of every parameter value and only writes a parameter
+// when that copy disagrees with the tree. A host that moves a parameter through
+// the bare AudioProcessorParameter::setValue() path - which is what automation
+// does, and what pluginval's state-restoration test does - notifies nobody, so
+// the copy does not move: on the next setStateInformation the copy and the tree
+// agree, APVTS writes nothing, and the parameter is left holding the host's
+// value. 57 of 58 parameters restored silently wrong that way.
+//
+// After replaceState every parameter has a child in the tree (APVTS creates a
+// missing one and fills it with the value it kept), so the tree is the authority
+// here: writing each parameter from it restores exactly what was stored and
+// leaves an older state's missing parameters where they were. The notification
+// also corrects the host's own cached copy of the value, which is what the two
+// on/off parameters pluginval first flagged were really complaining about.
+void MixAgentAudioProcessor::forceParametersFromState()
+{
+    for (auto* param : getParameters())
+    {
+        auto* rp = dynamic_cast<juce::RangedAudioParameter*>(param);
+        if (rp == nullptr)
+            continue;
+#if AGM_MUTATION(20)
+        if (rp->paramID == "rvb_enabled")   // mutation 20: one parameter left unrestored
+            continue;
+#endif
+        const juce::ValueTree child = apvts.state.getChildWithProperty("id", rp->paramID);
+        const auto& range = rp->getNormalisableRange();
+        const float fallback = range.convertFrom0to1(rp->getDefaultValue());
+        const float raw = child.isValid() ? (float)child.getProperty("value", fallback) : fallback;
+        rp->setValueNotifyingHost(range.convertTo0to1(raw));
+    }
 }
 
 namespace
@@ -647,9 +688,11 @@ void MixAgentAudioProcessor::setCurrentProgram(int index)
     // the parameters it cares about, so without this a preset was really
     // "whatever was loaded before, plus these few changes" - and preset 0 (Init)
     // was a no-op that reset nothing at all.
+#if !AGM_MUTATION(14)
     for (auto* param : getParameters())
         if (auto* rp = dynamic_cast<juce::RangedAudioParameter*>(param))
             rp->setValueNotifyingHost(rp->getDefaultValue());
+#endif
 
     switch (currentProgram)
     {
