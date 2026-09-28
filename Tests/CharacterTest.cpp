@@ -9,7 +9,7 @@
 #include "../Source/DSP/Limiter.h"
 #include "../Source/DSP/Saturation.h"
 #include "../Source/DSP/Delay.h"
-#include "../Source/DSP/Reverb.h"
+#include "../Source/DSP/ReverbEngine.h"
 #include "../Source/DSP/StereoImager.h"
 #include "../Source/DSP/DrumEngine.h"
 #include "../Source/DSP/InstrumentBank.h"
@@ -733,51 +733,69 @@ static void reverbSuite()
     const double sr = 48000.0;
 
     {
-        // The diffusion section should not colour the tank. Measure the wet-only
-        // magnitude response, octave by octave, with damping off and a short
-        // decay, relative to the average: a well-formed allpass chain gives a
-        // flat late field, a mis-normalised one gives comb ripple.
-        agm::Reverb r;
-        r.prepare(sr, 512);
-        r.setEnabled(true);
-        r.setDamping(0.0f);
-        r.setDecaySec(2.0f);
-        r.setSize(0.7f);
-        r.setMix(1.0f);
-        r.setPreDelayMs(0.0f);
-        r.setWidth(1.0f);
-        uint32_t s = 5150u;
-        auto out = runMono(r, (int)(sr * 6.0), 512, [&](int)
-        {
-            s = s * 1664525u + 1013904223u;
-            return 0.4f * ((float)(s >> 8) / 8388608.0f - 1.0f);
-        });
-        const int from = (int)(sr * 3.0), n = (int)(sr * 2.0);
+        // Flatness of the late field, octave by octave, with damping off.
+        //
+        // Measured over SIX noise seeds, not one. The bound this guard used to
+        // carry was picked from a single draw, and the unmodified reverb of the
+        // time spanned 2.55-5.76 dB across six seeds against a 4.5 dB guard: it
+        // was passing on luck, and a regression of a dB or more would have got
+        // through on the right seed. The distribution is the assertion now.
+        const uint32_t seeds[6] = { 5150u, 99u, 7u, 20260928u, 424242u, 31337u };
         const double bands[] = { 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0 };
-        double lvl[7], mean = 0.0;
-        std::cout << "  wet-only magnitude, damping 0 (dB re. mean):\n    ";
-        for (int i = 0; i < 7; ++i)
+        double spreads[6];
+        double sumSpread = 0.0, worstSpread = 0.0;
+        for (int si = 0; si < 6; ++si)
         {
-            // one-third-octave average around the band centre
-            double acc = 0.0;
-            for (int k = -3; k <= 3; ++k)
+            agm::ReverbEngine r;
+            r.prepare(sr, 512);
+            r.setEnabled(true);
+            r.setDamping(0.0f);
+            r.setDecaySec(2.0f);
+            r.setSize(0.7f);
+            r.setMix(1.0f);
+            r.setPreDelayMs(0.0f);
+            r.setWidth(1.0f);
+            uint32_t s = seeds[si];
+            auto out = runMono(r, (int)(sr * 6.0), 512, [&](int)
             {
-                const double f = bands[i] * std::pow(2.0, k / 18.0);
-                const double m = magAt(out, from, n, f, sr);
-                acc += m * m;
+                s = s * 1664525u + 1013904223u;
+                return 0.4f * ((float)(s >> 8) / 8388608.0f - 1.0f);
+            });
+            const int from = (int)(sr * 3.0), n = (int)(sr * 2.0);
+            double lvl[7], mean = 0.0;
+            for (int i = 0; i < 7; ++i)
+            {
+                // one-third-octave average around the band centre
+                double acc = 0.0;
+                for (int k = -3; k <= 3; ++k)
+                {
+                    const double f = bands[i] * std::pow(2.0, k / 18.0);
+                    const double m = magAt(out, from, n, f, sr);
+                    acc += m * m;
+                }
+                lvl[i] = dB(std::sqrt(acc / 7.0));
+                mean += lvl[i];
             }
-            lvl[i] = dB(std::sqrt(acc / 7.0));
-            mean += lvl[i];
+            mean /= 7.0;
+            double spread = 0.0;
+            if (si == 0)
+            {
+                std::cout << "  wet-only magnitude, damping 0, seed 5150 (dB re. mean):\n    ";
+                for (int i = 0; i < 7; ++i)
+                    std::cout << std::setw(6) << (int)bands[i] << "Hz" << std::setw(7)
+                              << std::fixed << std::setprecision(2) << (lvl[i] - mean) << "  ";
+                std::cout << "\n";
+            }
+            for (int i = 0; i < 7; ++i)
+                spread = std::max(spread, std::abs(lvl[i] - mean));
+            spreads[si] = spread;
+            sumSpread += spread;
+            worstSpread = std::max(worstSpread, spread);
         }
-        mean /= 7.0;
-        double spread = 0.0;
-        for (int i = 0; i < 7; ++i)
-        {
-            std::cout << std::setw(6) << (int)bands[i] << "Hz" << std::setw(7)
-                      << std::fixed << std::setprecision(2) << (lvl[i] - mean) << "  ";
-            spread = std::max(spread, std::abs(lvl[i] - mean));
-        }
-        std::cout << "\n  worst deviation from mean: " << std::setprecision(2) << spread << " dB\n";
+        const double meanSpread = sumSpread / 6.0;
+        std::cout << "  worst deviation from mean, six seeds:";
+        for (int si = 0; si < 6; ++si) std::cout << " " << std::setprecision(2) << spreads[si];
+        std::cout << " dB -> mean " << meanSpread << ", worst " << worstSpread << " dB\n";
         // The tilt is the comb bank's low-frequency modal density. The bank is now
         // 16 mutually-prime lines over a 1:2 range, 8 per stereo half, which took
         // this figure from 3.22 dB to 3.11 dB on this seed and from a 4.28 dB
@@ -796,37 +814,49 @@ static void reverbSuite()
         // H(z) = (1.25 z^-m - 0.5)/(1 - 0.5 z^-m), 2.183 dB of ripple and +3.52 dB
         // at DC - which is why it measured worse on every number and was reverted.
         // The sections are correct; leave them alone.
-        check(spread < 4.0, "reverb: with damping off the late field is flat within 4.0 dB from 125 Hz to 8 kHz");
+        check(meanSpread < 3.0, "reverb: the late field is flat within 3.0 dB on the six-seed mean, 125 Hz to 8 kHz");
+        check(worstSpread < 4.0, "reverb: no single seed exceeds 4.0 dB of deviation");
     }
 
     {
         // Stereo decorrelation: the two outputs must not be the same signal.
-        agm::Reverb r;
-        r.prepare(sr, 512);
-        r.setEnabled(true);
-        r.setDamping(0.4f); r.setDecaySec(2.0f); r.setSize(0.7f); r.setMix(1.0f);
-        r.setWidth(1.0f); r.setPreDelayMs(0.0f);
-        AudioBuffer<float> buf(2, 512);
-        std::vector<float> l, rr;
-        uint32_t s = 99u;
-        for (int b = 0; b < 400; ++b)
+        // Six seeds again - this measurement's own seed-to-seed range on an
+        // unmodified build was 0.036 to 0.347, so a single draw says very little.
+        const uint32_t seeds[6] = { 5150u, 99u, 7u, 20260928u, 424242u, 31337u };
+        double sumAbs = 0.0, worstAbs = 0.0;
+        std::cout << "  |L/R correlation| of the tail from a mono source, width 1.0, six seeds:";
+        for (int si = 0; si < 6; ++si)
         {
-            for (int i = 0; i < 512; ++i)
+            agm::ReverbEngine r;
+            r.prepare(sr, 512);
+            r.setEnabled(true);
+            r.setDamping(0.4f); r.setDecaySec(2.0f); r.setSize(0.7f); r.setMix(1.0f);
+            r.setWidth(1.0f); r.setPreDelayMs(0.0f);
+            AudioBuffer<float> buf(2, 512);
+            std::vector<float> l, rr;
+            uint32_t s = seeds[si];
+            for (int b = 0; b < 400; ++b)
             {
-                s = s * 1664525u + 1013904223u;
-                const float v = b < 40 ? 0.4f * ((float)(s >> 8) / 8388608.0f - 1.0f) : 0.0f;
-                buf.setSample(0, i, v); buf.setSample(1, i, v);
+                for (int i = 0; i < 512; ++i)
+                {
+                    s = s * 1664525u + 1013904223u;
+                    const float v = b < 40 ? 0.4f * ((float)(s >> 8) / 8388608.0f - 1.0f) : 0.0f;
+                    buf.setSample(0, i, v); buf.setSample(1, i, v);
+                }
+                r.process(buf);
+                if (b >= 100 && b < 300)
+                    for (int i = 0; i < 512; ++i) { l.push_back(buf.getSample(0, i)); rr.push_back(buf.getSample(1, i)); }
             }
-            r.process(buf);
-            if (b >= 100 && b < 300)
-                for (int i = 0; i < 512; ++i) { l.push_back(buf.getSample(0, i)); rr.push_back(buf.getSample(1, i)); }
+            double num = 0.0, dl = 0.0, dr = 0.0;
+            for (size_t i = 0; i < l.size(); ++i) { num += (double)l[i] * rr[i]; dl += (double)l[i] * l[i]; dr += (double)rr[i] * rr[i]; }
+            const double corr = std::abs(num / std::sqrt(std::max(dl * dr, 1e-30)));
+            std::cout << " " << std::setprecision(3) << corr;
+            sumAbs += corr;
+            worstAbs = std::max(worstAbs, corr);
         }
-        double num = 0.0, dl = 0.0, dr = 0.0;
-        for (size_t i = 0; i < l.size(); ++i) { num += (double)l[i] * rr[i]; dl += (double)l[i] * l[i]; dr += (double)rr[i] * rr[i]; }
-        const double corr = num / std::sqrt(std::max(dl * dr, 1e-30));
-        std::cout << "  L/R correlation of the tail from a mono source, width 1.0: "
-                  << std::setprecision(3) << corr << "\n";
-        check(std::abs(corr) < 0.8, "reverb: the tail is decorrelated between channels (|r| < 0.8)");
+        std::cout << " -> mean " << (sumAbs / 6.0) << ", worst " << worstAbs << "\n";
+        check(worstAbs < 0.8, "reverb: the tail is decorrelated between channels on every seed (|r| < 0.8)");
+        check(sumAbs / 6.0 < 0.5, "reverb: the six-seed mean |L/R correlation| stays below 0.5");
     }
 
     {
@@ -836,7 +866,7 @@ static void reverbSuite()
         // length does not move with the setting. Both are measured from an impulse.
         auto impulseAt = [&](float pd, int ch)
         {
-            agm::Reverb r;
+            agm::ReverbEngine r;
             r.prepare(sr, 64);
             r.setEnabled(true);
             r.setDamping(0.5f); r.setDecaySec(2.0f); r.setSize(0.7f);
@@ -917,7 +947,7 @@ static void reverbSuite()
         // ringing tank cannot be reached.
         auto run = [&](bool step)
         {
-            agm::Reverb r;
+            agm::ReverbEngine r;
             r.prepare(sr, 512);
             r.setEnabled(true);
             r.setDamping(0.2f); r.setDecaySec(6.0f); r.setSize(0.7f);

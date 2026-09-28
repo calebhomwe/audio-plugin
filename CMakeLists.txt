@@ -22,6 +22,10 @@ option(MIXAGENT_SANITIZE "Build the console test apps with -fsanitize=address,un
 # table of defects is in Source/DSP/Mutate.h; run them all with
 # tools/mutation_audit.sh.
 set(MIXAGENT_MUTATE "0" CACHE STRING "Inject one deliberate defect for the mutation audit (0 = none)")
+
+# Which reverb tank the plugin uses: the comb bank (default) or the feedback
+# delay network offered beside it. ReverbProbe measures both either way.
+option(MIXAGENT_REVERB_FDN "Use the FDN reverb tank instead of the comb bank" OFF)
 if(NOT MIXAGENT_MUTATE STREQUAL "0")
     message(WARNING "MixAgent: MUTATION BUILD - defect #${MIXAGENT_MUTATE} is compiled in. Never ship this.")
 endif()
@@ -55,10 +59,14 @@ target_link_libraries(MixAgent PRIVATE
 
 # Only our own translation units carry the mutation define, so switching it does
 # not rebuild the JUCE modules.
+set(AGM_OWN_DEFS MIXAGENT_MUTATE=${MIXAGENT_MUTATE})
+if(MIXAGENT_REVERB_FDN)
+    list(APPEND AGM_OWN_DEFS MIXAGENT_REVERB_FDN=1)
+endif()
 set_source_files_properties(
     Source/PluginProcessor.cpp Source/PluginEditor.cpp
     Tests/SmokeTest.cpp Tests/AuditTest.cpp Tests/CharacterTest.cpp Tests/EditorProbe.cpp
-    PROPERTIES COMPILE_DEFINITIONS MIXAGENT_MUTATE=${MIXAGENT_MUTATE})
+    PROPERTIES COMPILE_DEFINITIONS "${AGM_OWN_DEFS}")
 
 enable_testing()
 
@@ -99,6 +107,17 @@ juce_generate_juce_header(MixAgentCharacterTest)
 target_sources(MixAgentCharacterTest PRIVATE Tests/CharacterTest.cpp)
 target_compile_features(MixAgentCharacterTest PRIVATE cxx_std_17)
 target_link_libraries(MixAgentCharacterTest PRIVATE
+    juce::juce_audio_basics
+    juce::juce_audio_processors
+    juce::juce_dsp)
+
+# Reverb topology bench: not a pass/fail test, the instrument the comb-bank vs
+# FDN decision was made with. Not registered with add_test.
+juce_add_console_app(ReverbProbe)
+juce_generate_juce_header(ReverbProbe)
+target_sources(ReverbProbe PRIVATE Tests/ReverbProbe.cpp)
+target_compile_features(ReverbProbe PRIVATE cxx_std_17)
+target_link_libraries(ReverbProbe PRIVATE
     juce::juce_audio_basics
     juce::juce_audio_processors
     juce::juce_dsp)

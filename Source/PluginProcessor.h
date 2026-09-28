@@ -5,7 +5,7 @@
 #include "DSP/Compressor.h"
 #include "DSP/StereoImager.h"
 #include "DSP/Delay.h"
-#include "DSP/Reverb.h"
+#include "DSP/ReverbEngine.h"
 #include "DSP/Limiter.h"
 #include "DSP/DrumEngine.h"
 #include "DSP/InstrumentBank.h"
@@ -81,7 +81,7 @@ private:
     agm::Compressor compressor;
     agm::StereoImager imager;
     agm::Delay delay;
-    agm::Reverb reverb;
+    agm::ReverbEngine reverb;
     agm::Limiter limiter;
     agm::DrumEngine drumEngine;
     agm::InstrumentBank instruments;
