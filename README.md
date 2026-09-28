@@ -71,7 +71,10 @@ cmake --build build -j3
 
 Options: `MIXAGENT_COPY_PLUGIN` (default `ON`) copies the built plugin into the system plugin
 folder; `MIXAGENT_SANITIZE` (default `OFF`) builds the console test apps with
-`-fsanitize=address,undefined`.
+`-fsanitize=address,undefined`; `MIXAGENT_REVERB_FDN` (default `OFF`) swaps the reverb's comb
+bank for the feedback delay network beside it (`AUDIT.md` has the measurements that keep the
+comb bank); `MIXAGENT_MUTATE` (default `0`) and `MIXAGENT_COMP_RMS_MS` (default empty) exist for
+the audits described below and should be left alone in a normal build.
 
 ---
 
@@ -96,11 +99,36 @@ xvfb-run ./build/EditorProbe_artefacts/Release/EditorProbe             # editor 
 | `MixAgentCharacterTest` | module-level measurement: compressor transfer curve/ratio/knee/attack/make-up, limiter latency and 8×-measured true peak, saturation unity gain/harmonic series/aliasing, biquad response against its analytic transfer function, delay interpolator and wobble, reverb late-field flatness and decorrelation, imager width mapping, every drum voice's spectrum/decay/velocity response, instrument tuning/aliasing/release/voice stealing |
 | `EditorProbe` | constructs the editor, drives `resized()`, the program ComboBox, all 45 knobs and all 12 toggles; asserts every continuous parameter has a control, every knob's readout changes across its range, double-click returns each knob to its parameter's default, and that simply opening the editor and running the message loop changes no parameter |
 
-Run the suites after any DSP change. `AUDIT.md` records what has been measured, what is still
-open and what could not be verified headless. `CHANGELOG.md` records what changed and when.
+227 checks across the four targets. Run the suites after any DSP change. `AUDIT.md` records what
+has been measured, what is still open and what could not be verified headless. `CHANGELOG.md`
+records what changed and when.
 
-CI (`.github/workflows/ci.yml`) runs the same steps on every push and pull request on
-ubuntu-24.04 with a cached JUCE clone.
+### Proving the tests can fail
+
+A suite that has never been seen to fail is not evidence. `Source/DSP/Mutate.h` lists twenty
+deliberate defects — a stage neutralised, a knob read 100x out, a latency report that lies, an
+interpolator skipped, a parameter left out of the state restore — and each can be compiled in on
+its own with `-DMIXAGENT_MUTATE=n`. The switch compiles out completely at `0`, which is every
+normal build.
+
+```sh
+tools/mutation_audit.sh            # build and run each defect in turn; exit 1 if any survived
+tools/mutation_audit.sh 5 9 20     # just these
+```
+
+### Measuring the two reverb tanks
+
+```sh
+./build/ReverbProbe_artefacts/Release/ReverbProbe    # both tanks, six noise seeds, same probes
+```
+
+Band spread per octave, L/R correlation, per-octave RT60, modal ringing, tail to exact zero,
+60 s of full-scale square, RT60 against the Decay and Size controls, and CPU — for the comb bank
+and the FDN side by side. Not a pass/fail test, and not registered with CTest.
+
+CI (`.github/workflows/ci.yml`) runs the build, the four targets and a strict-warning pass on
+every push and pull request on ubuntu-24.04 with a cached JUCE clone. Two longer checks are
+manual (`workflow_dispatch`): pluginval at strictness 5 and 10, and the whole mutation table.
 
 ---
 
