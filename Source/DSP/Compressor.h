@@ -101,8 +101,13 @@ public:
 
             // Threshold and ratio are smoothed like everything else in here: they
             // are automation targets, and stepping them steps the gain.
+#if AGM_MUTATION(4)
+            thrS = tDbTarget;               // mutation 4: smoothing removed
+            slopeS = slopeTarget;
+#else
             thrS += mkC * (tDbTarget - thrS);
             slopeS += mkC * (slopeTarget - slopeS);
+#endif
 
             const float over = env - thrS;
             float gr = 0.0f;
@@ -113,6 +118,9 @@ public:
                 const float x = over + halfK;
                 gr = slopeS * x * x * invTwoK;
             }
+#if AGM_MUTATION(1)
+            gr = 0.0f;                      // mutation 1: the stage passes audio through
+#endif
 
             mk += mkC * (mkT - mk);
 
@@ -124,7 +132,14 @@ public:
                 grGain = 1.0f;
             if (!(grGain >= 0.0f))
                 grGain = 0.0f;
-            const float wetGain = grGain * dbToGain(mk);
+            float wetGain = grGain * dbToGain(mk);
+#if AGM_MUTATION(2)
+            // mutation 2: the defect that shipped - one clamped factor for both,
+            // so the make-up term can never raise the gain above unity
+            wetGain = dbToGain(mk - gr);
+            if (!(wetGain < 1.0f))
+                wetGain = 1.0f;
+#endif
 
             grMeter += grC * (gr - grMeter);
 
@@ -184,6 +199,9 @@ private:
     // range saturates there.
     static float internalAttackMs(float knobMs)
     {
+#if AGM_MUTATION(3)
+        return knobMs;                      // mutation 3: calibration removed
+#endif
         const float t = (knobMs - 1.15802f) / 1.88797f;
         return t > 0.05f ? t : 0.05f;
     }

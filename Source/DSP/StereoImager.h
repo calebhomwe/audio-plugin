@@ -55,7 +55,12 @@ public:
             const float gainR = balance < 0.0f ? atten : 1.0f;
 
             const float mid = 0.5f * (dryL + dryR);
+#if AGM_MUTATION(7)
+            juce::ignoreUnused(width);
+            const float side = 0.5f * (dryL - dryR);   // mutation 7: side gain frozen at unity
+#else
             const float side = 0.5f * (dryL - dryR) * width;
+#endif
 
             float outL = (mid + side) * gainL;
             float outR = (mid - side) * gainR;
@@ -80,7 +85,12 @@ public:
     // 2 %.
     void setWidthPercent(float percent)
     {
+#if AGM_MUTATION(8)
+        // mutation 8: the defect that shipped - the percentage taken as a raw gain
+        widthTarget = juce::jlimit(0.0f, 2.0f, sanitize(percent, 100.0f));
+#else
         widthTarget = juce::jlimit(0.0f, 2.0f, 0.01f * sanitize(percent, 100.0f));
+#endif
         widthSmooth.setTarget(widthTarget);
     }
 

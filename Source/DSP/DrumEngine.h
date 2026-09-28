@@ -1,5 +1,6 @@
 #pragma once
 #include <juce_dsp/juce_dsp.h>
+#include "Mutate.h"
 #include <cmath>
 #include <array>
 #include <algorithm>
@@ -245,6 +246,9 @@ private:
     // instrument each note stands for is in the comment.
     Spec specForNote(int n) const
     {
+#if AGM_MUTATION(11)
+        if (n == 41) n = 36;    // mutation 11: the low tom becomes a copy of the kick
+#endif
         Spec s;
         s.family = familyForNote(n);
 

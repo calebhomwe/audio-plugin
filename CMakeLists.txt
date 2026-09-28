@@ -17,6 +17,15 @@ option(MIXAGENT_COPY_PLUGIN "Copy the plugin into the system plugin folder after
 # Address/UB sanitizers on the headless test targets: -DMIXAGENT_SANITIZE=ON
 option(MIXAGENT_SANITIZE "Build the console test apps with -fsanitize=address,undefined" OFF)
 
+# Mutation audit: compile exactly one deliberate defect into the DSP so the test
+# suite can be shown to catch it. 0 (the default) injects nothing at all. The
+# table of defects is in Source/DSP/Mutate.h; run them all with
+# tools/mutation_audit.sh.
+set(MIXAGENT_MUTATE "0" CACHE STRING "Inject one deliberate defect for the mutation audit (0 = none)")
+if(NOT MIXAGENT_MUTATE STREQUAL "0")
+    message(WARNING "MixAgent: MUTATION BUILD - defect #${MIXAGENT_MUTATE} is compiled in. Never ship this.")
+endif()
+
 set(AGM_SOURCES
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp)
@@ -43,6 +52,13 @@ target_link_libraries(MixAgent PRIVATE
     juce::juce_gui_basics
     juce::juce_gui_extra
     juce::juce_audio_devices)
+
+# Only our own translation units carry the mutation define, so switching it does
+# not rebuild the JUCE modules.
+set_source_files_properties(
+    Source/PluginProcessor.cpp Source/PluginEditor.cpp
+    Tests/SmokeTest.cpp Tests/AuditTest.cpp Tests/CharacterTest.cpp Tests/EditorProbe.cpp
+    PROPERTIES COMPILE_DEFINITIONS MIXAGENT_MUTATE=${MIXAGENT_MUTATE})
 
 enable_testing()
 

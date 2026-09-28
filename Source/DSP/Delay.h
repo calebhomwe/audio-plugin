@@ -202,6 +202,14 @@ private:
     {
         const int i0 = static_cast<int>(readPos);
         const float f = readPos - static_cast<float>(i0);
+#if AGM_MUTATION(16)
+        // mutation 16: the read head degraded to nearest neighbour
+        {
+            int nn = f < 0.5f ? i0 : i0 + 1;
+            if (nn >= size) nn -= size;
+            return line[static_cast<size_t>(nn)];
+        }
+#endif
         const int im1 = i0 > 0 ? i0 - 1 : size - 1;
         int i1 = i0 + 1;
         if (i1 >= size)

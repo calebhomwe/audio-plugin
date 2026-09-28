@@ -1,5 +1,6 @@
 #pragma once
 #include <juce_dsp/juce_dsp.h>
+#include "Mutate.h"
 #include <cmath>
 #include <array>
 #include <algorithm>
@@ -346,6 +347,10 @@ private:
         if (x >= 1.0f) x = std::fmod(x, 1.0f);
         if (x < 0.0f) x += 1.0f;
         float y = 2.0f * x - 1.0f;
+#if AGM_MUTATION(12)
+        juce::ignoreUnused(inc);
+        return y;                       // mutation 12: PolyBLEP off, naive ramp
+#endif
         const float dt = inc > 1.0e-7f ? inc : 1.0e-7f;
         if (x < dt)
         {

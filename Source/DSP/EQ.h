@@ -179,9 +179,16 @@ private:
     {
         for (int i = 0; i < 7; ++i)
         {
+#if AGM_MUTATION(17)
+            // mutation 17: coefficient smoothing removed, the band jumps
+            curFreq[i] = tgtFreq[i];
+            curGain[i] = tgtGain[i];
+            curQ[i] = tgtQ[i];
+#else
             curFreq[i] += (tgtFreq[i] - curFreq[i]) * smoothCoef;
             curGain[i] += (tgtGain[i] - curGain[i]) * smoothCoef;
             curQ[i] += (tgtQ[i] - curQ[i]) * smoothCoef;
+#endif
             if (std::fabs(tgtFreq[i] - curFreq[i]) < 0.01f)
                 curFreq[i] = tgtFreq[i];
             if (std::fabs(tgtGain[i] - curGain[i]) < 0.0015f)

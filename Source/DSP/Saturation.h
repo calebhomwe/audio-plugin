@@ -327,7 +327,12 @@ private:
 
     // useIntegerLatency = true: the two FIR stages otherwise sum to a half-sample
     // group delay, which no host can compensate; JUCE pads it to a whole sample.
+#if AGM_MUTATION(13)
+    // mutation 13: no oversampling at all - the shapers fold their harmonics back
+    juce::dsp::Oversampling<float> oversampler { 2, 0, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, true, true };
+#else
     juce::dsp::Oversampling<float> oversampler { 2, 2, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, true, true };
+#endif
     juce::AudioBuffer<float> workBuffer;
     size_t osMaxBlock = 1;
     static constexpr int kMaxLatency = 256;

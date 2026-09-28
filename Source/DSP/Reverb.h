@@ -184,8 +184,17 @@ private:
     // i.e. within 0.11 dB except 0.39 dB at the longest decay. Without the
     // normalisation the wet level fell 3.1 dB across the board.
     static constexpr float invSqrt2 = 0.70710678f;
+#if AGM_MUTATION(18)
+    // mutation 18: half the bank switched off - four lines per stereo half, the
+    // modal density the 16-line set replaced. Scales are the 8-line ones.
+    static constexpr int activeCombs = 8;
+    static constexpr float monoCombScale = 0.5f;
+    static constexpr float stereoCombScale = 1.0f;
+#else
+    static constexpr int activeCombs = numCombs;
     static constexpr float monoCombScale = 0.5f * invSqrt2;     // 0.5 * sqrt(8/16)
     static constexpr float stereoCombScale = invSqrt2;          // 1.0 * sqrt(4/8)
+#endif
     // Both are written out for numCombs == 16. Change the line count and they have
     // to be recomputed as 0.5 * sqrt(8/numCombs) and sqrt(4/(numCombs/2)), so fail
     // the build rather than quietly shift the whole wet level.
@@ -250,6 +259,7 @@ private:
         const float lp = c.lpState + c.lpCoef * (out - c.lpState);
         c.lpState = lp;
         float v = in + lp * c.fb;
+#if !AGM_MUTATION(10)
         if (!std::isfinite(v))
         {
             clearTank();
@@ -257,6 +267,7 @@ private:
         }
         else if (v > -1.0e-24f && v < 1.0e-24f)
             v = 0.0f;
+#endif
         dl.buf[(size_t)dl.idx] = v;
         if (++dl.idx >= dl.curLen)
             dl.idx = 0;
@@ -300,15 +311,22 @@ private:
             // sound and the tank's onset, so it must delay what goes in. Behind the
             // tank it re-times the ringing tail as well, which is audible the moment
             // the knob is automated.
+#if AGM_MUTATION(9)
+            const float in = dry * inGain;   // mutation 9: pre-delay behind the tank
+#else
             const float in = predelays[0].next(dry, preDelayF) * inGain;
+#endif
             float acc = 0.0f;
-            for (int i = 0; i < numCombs; ++i)
+            for (int i = 0; i < activeCombs; ++i)
                 acc += combProcess(combs[i], in);
             float wet = acc * monoCombScale;
             wet = allpassProcess(allpasses[0], wet);
             wet = allpassProcess(allpasses[1], wet);
             wet = allpassProcess(allpasses[2], wet);
             wet = allpassProcess(allpasses[3], wet);
+#if AGM_MUTATION(9)
+            wet = predelays[0].next(wet, preDelayF);
+#endif
             const float bg = bypass.next();
             mixCur += (mixTarget - mixCur) * mixCoef;
             const float m = mixCur * bg;
@@ -328,13 +346,18 @@ private:
                 dryL = 0.0f;
             if (!std::isfinite(dryR))
                 dryR = 0.0f;
+#if AGM_MUTATION(9)
+            const float inL = dryL * inGain;   // mutation 9: pre-delay behind the tank
+            const float inR = dryR * inGain;
+#else
             const float inL = predelays[0].next(dryL, preDelayF) * inGain;
             const float inR = predelays[1].next(dryR, preDelayF) * inGain;
+#endif
             float accL = 0.0f;
             float accR = 0.0f;
-            for (int i = 0; i < numCombs / 2; ++i)
+            for (int i = 0; i < activeCombs / 2; ++i)
                 accL += combProcess(combs[i], inL);
-            for (int i = numCombs / 2; i < numCombs; ++i)
+            for (int i = numCombs / 2; i < numCombs / 2 + activeCombs / 2; ++i)
                 accR += combProcess(combs[i], inR);
             accL *= stereoCombScale;
             accR *= stereoCombScale;
@@ -342,6 +365,10 @@ private:
             wetL = allpassProcess(allpasses[1], wetL);
             float wetR = allpassProcess(allpasses[2], accR);
             wetR = allpassProcess(allpasses[3], wetR);
+#if AGM_MUTATION(9)
+            wetL = predelays[0].next(wetL, preDelayF);
+            wetR = predelays[1].next(wetR, preDelayF);
+#endif
             const float mixL = w1 * wetL + w2 * wetR;
             const float mixR = w2 * wetL + w1 * wetR;
             const float bg = bypass.next();

@@ -145,7 +145,11 @@ public:
         updateCoefs();
     }
 
+#if AGM_MUTATION(6)
+    int getLatencySamples() const { return 0; }   // mutation 6: the report lies
+#else
     int getLatencySamples() const { return delaySamples; }
+#endif
 
     // Sidechain (detector) delay in samples: the 4x interpolator looks at the
     // centre of its history window, so the gain computer runs this far behind
@@ -202,6 +206,10 @@ private:
         int& hp = histPos[(size_t)ch];
         hp = (hp + 1) & kHistMask;
         h[(size_t)hp] = s;
+#if AGM_MUTATION(5)
+        // mutation 5: the interpolator is skipped, the detector sees sample peaks
+        return std::fabs(h[(size_t)((hp - kSidechainDelay) & kHistMask)]);
+#endif
         float peak = std::fabs(h[(size_t)((hp - kSidechainDelay) & kHistMask)]);
         peak = std::max(peak, std::fabs(h[(size_t)((hp - kSidechainDelay + 1) & kHistMask)]));
         for (int p = 0; p < kPhases; ++p)
