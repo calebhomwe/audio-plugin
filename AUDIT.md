@@ -19,7 +19,7 @@ cmake --build build -j3
 xvfb-run -a ./build/EditorProbe_artefacts/Release/EditorProbe           # editor wiring and readouts
 ```
 
-26 findings: 5 CRITICAL, 8 MAJOR, 13 MINOR, plus a COSMETIC list and an unproven list.
+27 findings: 6 CRITICAL, 8 MAJOR, 13 MINOR, plus a COSMETIC list and an unproven list.
 The wave-4 and wave-5 sections near the end carry the later work; C5 (wave 5, found by
 pluginval) is written up there.
 
@@ -939,6 +939,35 @@ on/off parameter — a value the plugin's saved state cannot represent, because 
 snapped one — and then asserting that it survived a round trip. It did, only because nothing
 restored it. Both now go through the parameter.
 
+### C6 (NEW, CRITICAL) — the delay read head could read one sample past its line. `Source/DSP/Delay.h:203`
+
+Found by AddressSanitizer, on the denormal-cost suite this pass added:
+
+```
+==30997==ERROR: AddressSanitizer: heap-buffer-overflow ... READ of size 4
+    #0 agm::Delay::readCubic(...) Source/DSP/Delay.h:221
+    #2 agm::Delay::process(juce::AudioBuffer<float>&) Source/DSP/Delay.h:135
+    #3 MixAgentAudioProcessor::processBlock(...) Source/PluginProcessor.cpp:446
+0x7f35920d4fa0 is located 0 bytes after 432032-byte region
+```
+
+`readPos` is `writeIndex - dist`, wrapped by adding the line length when it goes negative. A
+distance a hair larger than `writeIndex` leaves a value like `-1e-7`, and `-1e-7 + sizeF` rounds
+to `sizeF` itself in float — one index past the end of the line. The wraps for `i0-1`, `i0+1` and
+`i0+2` were all present; the wrap for `i0` itself was not.
+
+**This is the same defect, in the same shape, that wave 3 found with AddressSanitizer in the
+reverb's pre-delay** (see N-predelay, "delayF is a smoothed value and can sit at e.g. 1e-7") and
+fixed there — in a second read head that nobody went back to check. A one-past-the-end read on the
+audio thread, in shipping code, for three passes.
+
+**FIXED.** The integer index is wrapped after the float and the fraction is clamped, exactly as
+the pre-delay does it. It needed a particular combination to land on the boundary — feedback 0.9,
+mix 0.5, every module engaged, 20 s of audio — which is why three previous sanitizer runs missed
+it; the denormal-cost suite added this pass happens to sit exactly there, so the ASan build now
+reaches it. After: all three targets clean under `-fsanitize=address,undefined` with leak
+detection on.
+
 ### The mutation audit
 
 Method: a compile-time switch, `-DMIXAGENT_MUTATE=n`, one defect per value of `n`, listed in
@@ -1187,7 +1216,10 @@ strict warnings, the exact CI step, on all seven of our own translation units:
 tools/mutation_audit.sh                           20 of 20 caught, 0 survived
 pluginval --strictness-level 5  --validate ...    SUCCESS
 pluginval --strictness-level 10 --validate ...    SUCCESS   (was FAILURE, 6 of 59)
-ASAN_UBSAN_PLACEHOLDER
+ASAN_OPTIONS=detect_leaks=1, -fsanitize=address,undefined:
+  MixAgentSmokeTest 153/153, MixAgentAuditTest 12/12, MixAgentCharacterTest 50/50
+  all exit 0, no AddressSanitizer, LeakSanitizer or UndefinedBehaviorSanitizer report
+  (it found C6 below first; these are the numbers after that fix)
 ```
 
 220 -> 227 checks. **No assertion was loosened.** Three were tightened: the reverb flatness guard
@@ -1219,6 +1251,7 @@ printed beside it.
 
 | # | Severity | Finding | Status |
 |---|---|---|---|
+| C6 | CRITICAL | Delay read head read one sample past its line (audio thread) | FIXED (wave 5) — found by AddressSanitizer on the new denormal suite |
 | C5 | CRITICAL | `setStateInformation` restored 1 of 58 parameters when the host had written them without notifying | FIXED (wave 5) — found by pluginval, strictness 10 FAILURE -> SUCCESS |
 | C1 | CRITICAL | Compressor make-up gain unreachable | FIXED — 0.00 → 3.00/6.00/12.00/24.00 dB |
 | C2 | CRITICAL | Img Width saturates at 2 %; 100 % means 200 % | FIXED — side gain now tracks the percentage |
@@ -1249,7 +1282,7 @@ printed beside it.
 New in wave 4: the reverb's spectral tilt (a comb-bank rebuild, 4.28 → 2.35 dB on a six-seed
 mean), and a defect in `SmokeTest`'s own RT60 estimator that read 58 % high at a 5 s decay.
 
-New in wave 5: C5 above; twenty mutations with no survivors; the denormal guard shown to be
+New in wave 5: C5 and C6 above; twenty mutations with no survivors; the denormal guard shown to be
 worth 2x on a decaying tail; an FDN reverb measured against the comb bank over six seeds and
 rejected on the numbers; and two of the repository's own instruments found wrong — the probe
 that put a 2 ms floor on the compressor's attack, and the harness call that wrote illegal values

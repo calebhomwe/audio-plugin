@@ -20,6 +20,15 @@ had missed. Full workings in `AUDIT.md` under "Wave 5".
   → SUCCESS**; strictness 5 SUCCESS → SUCCESS. The audible state was never wrong (the DSP reads
   these through a `>= 0.5` test), but a host reading a parameter back after a session load saw
   its own stale value.
+- **The delay's read head could read one sample past its line** (`Source/DSP/Delay.h`).
+  AddressSanitizer, on the denormal-cost suite added this pass: a 4-byte read 0 bytes past the end
+  of a 432 032-byte delay line, from `processBlock`. `readPos` is `writeIndex - dist` wrapped by
+  adding the line length; a distance a hair larger than `writeIndex` leaves `-1e-7`, and
+  `-1e-7 + sizeF` rounds to `sizeF` in float. The wraps for `i0-1`, `i0+1` and `i0+2` were there,
+  the one for `i0` was not. **This is the same defect wave 3 found and fixed in the reverb's
+  pre-delay**, in a second read head nobody went back to check — three passes of sanitizer runs
+  missed it because reaching the boundary needs feedback 0.9, mix 0.5, every module engaged and
+  20 s of audio, which is exactly where the new suite sits.
 - **`Harness::setRaw/getRaw` convert through the parameter, not through its range**
   (`Tests/TestSupport.h`). `NormalisableRange::convertTo0to1` does not snap to a parameter's
   legal values; `RangedAudioParameter::convertTo0to1` does. The torture probe was writing 0.44
@@ -73,6 +82,10 @@ had missed. Full workings in `AUDIT.md` under "Wave 5".
   drum bounds (hat HF/LF, snare centroid, crash brightness and length, velocity span) assert the
   worst of six noise realisations. All the drum margins were wide; nothing there was passing on
   luck.
+- **Sanitizers**: the whole suite under `-fsanitize=address,undefined` with leak detection on —
+  `MixAgentSmokeTest` 153/153, `MixAgentAuditTest` 12/12, `MixAgentCharacterTest` 50/50, all
+  exiting 0 with no AddressSanitizer, LeakSanitizer or UndefinedBehaviorSanitizer report. It found
+  the delay defect above on the way.
 - **220 → 227 checks**, 4/4 ctest targets pass. Allocations inside `processBlock` across 24
   rate/block combinations: **0**. Reported latency equals measured at every setting. No
   assertion was loosened: the compressor's sub-3 ms attack bound tightened from a fixed 2.25 ms
