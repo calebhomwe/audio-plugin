@@ -200,8 +200,18 @@ private:
 
     static float readCubic(const std::vector<float>& line, float readPos, int size)
     {
-        const int i0 = static_cast<int>(readPos);
-        const float f = readPos - static_cast<float>(i0);
+        int i0 = static_cast<int>(readPos);
+        const float f = juce::jlimit(0.0f, 1.0f, readPos - static_cast<float>(i0));
+        // readPos comes from `writeIndex - dist`, wrapped by adding the line length
+        // when it goes negative. A distance a hair over writeIndex leaves a value
+        // like -1e-7, and -1e-7 + sizeF rounds to sizeF itself in float - one past
+        // the end of the line. The wrap has to happen on the integer, not be
+        // trusted from the float. AddressSanitizer caught exactly this in the
+        // reverb's pre-delay in wave 3; the delay's read head had it too.
+        if (i0 >= size)
+            i0 -= size;
+        if (i0 < 0)
+            i0 = 0;
 #if AGM_MUTATION(16)
         // mutation 16: the read head degraded to nearest neighbour
         {
