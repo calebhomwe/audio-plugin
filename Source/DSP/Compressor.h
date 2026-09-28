@@ -180,9 +180,9 @@ private:
     // window, and that window slows the level rise, so the measured time to 63 %
     // of the final gain reduction came out about twice the knob. The hybrid
     // detector is the feature - it is what makes the gain reduction depend on peak
-    // level rather than crest factor, measured at 2.16 dB between a square and a
-    // sine of the same peak - so the detector stays and the knob is calibrated
-    // against it instead.
+    // level rather than crest factor, measured at 2.13 dB between a square and a
+    // sine of the same peak against the 3 dB a pure RMS detector would give - so
+    // the detector stays and the knob is calibrated against it instead.
     //
     // Measured at 48 kHz, 1 kHz tone, threshold -20 dB, ratio 4, -40 -> -6 dBFS
     // step (10.5 dB of final gain reduction), the relation is linear:
@@ -194,9 +194,16 @@ private:
     // 20.5 ms at 5 kHz), which is true of any log-domain one-pole detector and is
     // not something a mapping can remove.
     //
-    // Below roughly 2 ms the knob cannot be honoured at all: the RMS window puts a
-    // floor of about 2 ms on how fast the detector can rise, so the bottom of the
-    // range saturates there.
+    // There is no floor here worth the name. Wave 4 recorded one - "below roughly
+    // 2 ms the knob cannot be honoured, the RMS window puts a floor of about 2 ms
+    // on the detector" - and that was the test probe's own resolution, not the
+    // compressor's: it read the output peak over a 2 ms window, so 2.00 ms was the
+    // smallest figure it could print. Measured with a one-cycle window instead, the
+    // shipped 8 ms branch reaches 1.33 ms at a 2 ms knob and goes below the probe's
+    // 1.00 ms resolution under that. Shortening the window to 4 / 3 / 2 ms buys
+    // 0.5-0.9 ms in the middle of the range and would need the fit above redone for
+    // it; the crest figure below moves 2.13 -> 2.02 / 1.95 / 1.81 dB. Nothing to
+    // lift, so the window stays at 8 ms. -DMIXAGENT_COMP_RMS_MS=n re-measures it.
     static float internalAttackMs(float knobMs)
     {
 #if AGM_MUTATION(3)
@@ -206,13 +213,21 @@ private:
         return t > 0.05f ? t : 0.05f;
     }
 
+    // The RMS branch's window. Overridable at build time only so the trade-off it
+    // sits on can be measured: -DAGM_COMP_RMS_MS=2 etc. See AUDIT.md.
+#ifdef AGM_COMP_RMS_MS
+    static constexpr double kRmsWindowMs = AGM_COMP_RMS_MS;
+#else
+    static constexpr double kRmsWindowMs = 8.0;
+#endif
+
     void updateCoefs()
     {
         const double fs = sr > 0.0 ? sr : 44100.0;
         // one-pole step coefficients: env += coef * (target - env)
         attackCoef = (float)(1.0 - std::exp(-1.0 / (internalAttackMs(attackMs) * 0.001 * fs)));
         releaseCoef = (float)(1.0 - std::exp(-1.0 / (releaseMs * 0.001 * fs)));
-        rmsCoef = (float)(1.0 - std::exp(-1.0 / (8.0 * 0.001 * fs)));
+        rmsCoef = (float)(1.0 - std::exp(-1.0 / (kRmsWindowMs * 0.001 * fs)));
         mixCoef = (float)(1.0 - std::exp(-1.0 / (10.0 * 0.001 * fs)));
         mkCoef = (float)(1.0 - std::exp(-1.0 / (15.0 * 0.001 * fs)));
         grCoef = (float)(1.0 - std::exp(-1.0 / (50.0 * 0.001 * fs)));

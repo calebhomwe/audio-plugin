@@ -59,13 +59,21 @@ target_link_libraries(MixAgent PRIVATE
 
 # Only our own translation units carry the mutation define, so switching it does
 # not rebuild the JUCE modules.
+# The compressor's RMS-branch window, in ms. Empty = the shipped default. Only
+# here so the crest-independence / attack-floor trade-off can be re-measured.
+set(MIXAGENT_COMP_RMS_MS "" CACHE STRING "Override the compressor's RMS window in ms (empty = default)")
+
 set(AGM_OWN_DEFS MIXAGENT_MUTATE=${MIXAGENT_MUTATE})
+if(NOT MIXAGENT_COMP_RMS_MS STREQUAL "")
+    list(APPEND AGM_OWN_DEFS AGM_COMP_RMS_MS=${MIXAGENT_COMP_RMS_MS})
+endif()
 if(MIXAGENT_REVERB_FDN)
     list(APPEND AGM_OWN_DEFS MIXAGENT_REVERB_FDN=1)
 endif()
 set_source_files_properties(
     Source/PluginProcessor.cpp Source/PluginEditor.cpp
     Tests/SmokeTest.cpp Tests/AuditTest.cpp Tests/CharacterTest.cpp Tests/EditorProbe.cpp
+    Tests/ReverbProbe.cpp
     PROPERTIES COMPILE_DEFINITIONS "${AGM_OWN_DEFS}")
 
 enable_testing()

@@ -210,12 +210,20 @@ static void compressorSuite()
         // the detector's 8 ms RMS branch slows the level rise. The branch is the
         // feature (it is what keeps the gain reduction crest-independent, asserted
         // just below), so the mapping was calibrated against it rather than removed.
-        // Below about 2 ms the RMS window puts a floor on how fast the detector can
-        // rise and the knob saturates; from 3 ms up the printed value holds.
+        //
+        // There is no 2 ms floor. That was recorded as a property of the RMS branch
+        // and it was a property of THIS probe: it read the output peak over a two-
+        // millisecond window and started two milliseconds after the step, so 2.00 ms
+        // was the smallest number it could ever print. One cycle of the 1 kHz probe
+        // is enough, and with that the shipped 8 ms window reaches 1.33 ms at a 2 ms
+        // knob and the instrument's own 1.00 ms floor below that. Shortening the RMS
+        // window to 4 / 3 / 2 ms moves the 3 ms knob to 2.33 / 2.33 / 1.92 ms and the
+        // crest figure below to 2.02 / 1.95 / 1.81 dB; with no floor to lift, none of
+        // that is worth a recalibration, so the window stays at 8 ms.
         std::cout << "  attack / release from a -40 -> -6 dBFS burst:\n";
         bool ok = true;
         bool calibrated = true;
-        for (float atk : { 1.0f, 3.0f, 5.0f, 10.0f, 25.0f, 50.0f, 100.0f })
+        for (float atk : { 0.1f, 0.5f, 1.0f, 2.0f, 3.0f, 5.0f, 10.0f, 25.0f, 50.0f, 100.0f })
         {
             agm::Compressor c;
             c.prepare(sr, 64);
@@ -232,8 +240,12 @@ static void compressorSuite()
             // envelope of the gain applied after the step
             const double finalGr = 10.5;   // (1-1/4) * (|-6| - |-20|) = 10.5 dB
             int t63 = -1;
-            const int win = (int)(sr * 0.002);
-            for (int i = quiet + win; i < n - win; i += 8)
+            // One cycle of the 1 kHz probe. It used to be two, which put a 2.0 ms
+            // floor on anything this could report - and that floor was then written
+            // up as a property of the compressor's RMS branch. It is not: it was the
+            // instrument. Nothing below 1 ms is resolvable at 1 kHz either way.
+            const int win = (int)(sr * 0.001);
+            for (int i = quiet + win; i < n - win; i += 4)
             {
                 const double outDb = dB(peakOf(out, i, i + win));
                 const double gr = -6.0 - outDb;
@@ -244,14 +256,16 @@ static void compressorSuite()
                       << " ms -> 63 % of " << finalGr << " dB GR reached at "
                       << std::setprecision(2) << ms << " ms\n";
             if (t63 < 0 || ms > atk * 2.0 + 1.5 || ms < atk * 0.4 - 1.0) ok = false;
-            // the calibrated bound: within 10 % of the printed value, or the 2 ms
-            // floor for the settings that cannot be reached at all
+            // the calibrated bound: within 10 % of the printed value from 3 ms up,
+            // and at or faster than the knob below that, down to the 1 ms the probe
+            // can resolve
             if (t63 < 0) calibrated = false;
             else if (atk >= 3.0f) { if (std::abs(ms - atk) > atk * 0.1 + 0.25) calibrated = false; }
-            else if (ms > 2.25) calibrated = false;
+            else if (ms > std::max(atk, 1.0f) + 0.4) calibrated = false;
         }
         check(ok, "compressor: attack time to 63 % of the final gain reduction tracks the knob");
-        check(calibrated, "compressor: measured attack equals the printed knob within 10 % from 3 ms up");
+        check(calibrated, "compressor: measured attack equals the printed knob within 10 % from 3 ms up, "
+                          "and is no slower than the knob below that");
     }
 
     {
