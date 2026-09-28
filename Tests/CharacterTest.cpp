@@ -948,8 +948,14 @@ static void reverbSuite()
                 if (ch == 2 && (rt <= 0.0 || std::abs(rt - rtRef) > rtRef * 0.05)) tailOk = false;
             }
         }
-        check(onsetOk, "reverb: the wet onset is the pre-delay setting plus the tank's own onset, within 0.2 ms");
-        check(tailOk, "reverb: the tail length does not change with the pre-delay (within 5 %)");
+        // These two prove the pre-delay is accurate, NOT that it sits in front of
+        // the tank. A pre-delay and a tank in series are linear and time-invariant,
+        // so swapping their order leaves the impulse response - and therefore both
+        // of these numbers - bit-identical; the mutation audit confirmed it, moving
+        // the pre-delay behind the tank left both green. The position is observable
+        // only while the knob MOVES, which is the assertion below.
+        check(onsetOk, "reverb: the wet onset arrives the pre-delay setting later than the tank's own onset, within 0.2 ms");
+        check(tailOk, "reverb: the tail length does not change with the pre-delay setting (within 5 %)");
     }
 
     {
@@ -1279,6 +1285,63 @@ static void drumSuite()
         std::cout << "  kick: last non-zero sample is " << std::setprecision(1) << tailDb
                   << " dB below the peak (the step to silence)\n";
         check(tailDb < -60.0, "drums: a voice is freed only once its output is more than 60 dB down (no truncation click)");
+    }
+
+    {
+        // Everything above is ONE realisation of the engine's noise: the generator
+        // is seeded at prepare(), so a fresh engine always produces the same hit,
+        // and a bound picked from it is a bound picked from one draw. This
+        // repository has already been caught by that once - the reverb's flatness
+        // guard was passing on a lucky seed - so the noise-dependent drum bounds
+        // are re-measured over six realisations, obtained by letting the generator
+        // run on through consecutive hits on one engine.
+        agm::DrumEngine shared;
+        shared.prepare(sr, 256);
+        shared.setEnabled(true);
+        shared.setDrumLevelDb(0.0f);
+        double hatWorst = 1e9, snareCenWorst = 1e9, crashRatioWorst = 1e9, crashDecayWorst = 1e9;
+        double velSpanWorst = 1e9;
+        std::cout << "  noise-dependent metrics over six realisations:\n";
+        for (int rep = 0; rep < 6; ++rep)
+        {
+            auto hat = renderDrum(42, 1.0f, sr, 2.0, &shared);
+            double lowE = 0.0, highE = 0.0;
+            for (double f = 100.0; f < 20000.0; f *= 1.06)
+            {
+                const double m = magAt(hat, 0, (int)(sr * 0.03), f, sr);
+                if (f < 4000.0) lowE += m * m; else highE += m * m;
+            }
+            const double hatRatio = dB(std::sqrt(highE / std::max(lowE, 1e-18)));
+
+            auto snare = renderDrum(38, 1.0f, sr, 2.0, &shared);
+            const double snareCen = centroidHz(snare, 0, (int)(sr * 0.04), sr);
+            auto crash = renderDrum(49, 1.0f, sr, 2.0, &shared);
+            const double crashCen = centroidHz(crash, 0, (int)(sr * 0.05), sr);
+            const double crashDecay = decayMs(crash, sr, 20.0);
+
+            double lo = 1e9, hi = -1e9;
+            for (float v : { 0.25f, 1.0f })
+            {
+                const double pk = dB(peakOf(renderDrum(42, v, sr, 1.0, &shared), 0, (int)(sr * 1.0)));
+                lo = std::min(lo, pk); hi = std::max(hi, pk);
+            }
+            const double velSpan = hi - lo;
+
+            std::cout << "    " << rep << ": hat HF/LF " << std::setprecision(1) << hatRatio
+                      << " dB, snare centroid " << std::setprecision(0) << snareCen
+                      << " Hz, crash/snare centroid " << std::setprecision(2) << (crashCen / std::max(snareCen, 1.0))
+                      << ", crash -20 dB " << std::setprecision(0) << crashDecay
+                      << " ms, hat velocity span " << std::setprecision(1) << velSpan << " dB\n";
+            hatWorst = std::min(hatWorst, hatRatio);
+            snareCenWorst = std::min(snareCenWorst, snareCen);
+            crashRatioWorst = std::min(crashRatioWorst, crashCen / std::max(snareCen, 1.0));
+            crashDecayWorst = std::min(crashDecayWorst, crashDecay);
+            velSpanWorst = std::min(velSpanWorst, velSpan);
+        }
+        check(hatWorst > -6.0 && snareCenWorst > 600.0,
+              "drums: the hat stays metal and the snare stays bright on every one of six noise realisations");
+        check(crashRatioWorst > 1.3 && crashDecayWorst > 150.0 && velSpanWorst > 6.0,
+              "drums: crash brightness, crash length and velocity span hold on every one of six noise realisations");
     }
 
     {

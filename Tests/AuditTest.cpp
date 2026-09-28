@@ -600,6 +600,80 @@ static void tailSuite()
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// What the denormal guard is worth, measured rather than assumed.
+//
+// `juce::ScopedNoDenormals` in processBlock is the standard guard, and removing it
+// left every other assertion green. Denormals cost time, they do not change a
+// result, so the only way to see one is to time it.
+//
+// The reference has to be a workload with no denormals in it at all, in either
+// build, which means a LOUD one: a -120 dBFS offset does not do it, because the
+// filter and oversampler states ring down into the denormal range anyway - with
+// the guard off, that "normal" reference also slowed by 2x and the ratio between
+// the two hid the whole effect. Against a loud reference the guard is worth 2x:
+//
+//   guard on    tail 1049 ms   loud 1026 ms   ratio 1.02
+//   guard off   tail 2219 ms   loud 1031 ms   ratio 2.15
+static void denormalCostSuite()
+{
+    std::cout << "\n=== DENORMAL COST ===\n";
+    auto timeTail = [](bool loud)
+    {
+        Harness h(48000.0, 512);
+        h.enableAllModulesModerate();
+        h.setRaw("rvb_decay", 8.0f);
+        h.setRaw("rvb_mix", 0.6f);
+        h.setRaw("dly_feedback", 0.9f);
+        h.setRaw("dly_mix", 0.5f);
+        AudioBuffer<float> buf(2, 512);
+        MidiBuffer midi;
+        // excite the feedback paths
+        uint32_t rng = 5u;
+        for (int b = 0; b < 40; ++b)
+        {
+            for (int i = 0; i < 512; ++i)
+            {
+                rng = rng * 1664525u + 1013904223u;
+                const float v = 0.4f * ((float)(rng >> 8) / 8388608.0f - 1.0f);
+                buf.setSample(0, i, v); buf.setSample(1, i, v);
+            }
+            h.proc->processBlock(buf, midi);
+        }
+        // then time 20 s: either the tail ringing down into silence, or the same
+        // number of blocks of loud noise, which never goes near a denormal
+        const int blocks = (int)(48000.0 * 20.0 / 512.0);
+        double best = 1.0e9;
+        for (int rep = 0; rep < 3; ++rep)
+        {
+            const auto t0 = Time::getMillisecondCounterHiRes();
+            for (int b = 0; b < blocks; ++b)
+            {
+                for (int i = 0; i < 512; ++i)
+                {
+                    float v = 0.0f;
+                    if (loud)
+                    {
+                        rng = rng * 1664525u + 1013904223u;
+                        v = 0.3f * ((float)(rng >> 8) / 8388608.0f - 1.0f);
+                    }
+                    buf.setSample(0, i, v); buf.setSample(1, i, v);
+                }
+                h.proc->processBlock(buf, midi);
+            }
+            best = std::min(best, Time::getMillisecondCounterHiRes() - t0);
+        }
+        return best;
+    };
+    const double tail = timeTail(false);
+    const double loud = timeTail(true);
+    std::cout << "  20 s of a decaying tail: " << std::fixed << std::setprecision(1) << tail
+              << " ms, 20 s of loud noise (no denormals anywhere): " << loud << " ms (ratio "
+              << std::setprecision(3) << (tail / std::max(loud, 1.0)) << ")\n";
+    check(tail < loud * 1.5 + 50.0,
+          "a decaying tail into silence costs no more than a loud signal does - the denormal guard is engaged");
+}
+
 int main()
 {
     ScopedJuceInitialiser_GUI init;
@@ -609,6 +683,7 @@ int main()
     tortureSuite();
     presetSuite();
     tailSuite();
+    denormalCostSuite();
     const auto ms = Time::getMillisecondCounterHiRes() - t0;
     std::cout << (gFailures == 0 ? "AUDIT TESTS PASSED" : "AUDIT TESTS FAILED") << " ("
               << gChecks - gFailures << "/" << gChecks << " checks, " << (int)ms << " ms)\n";
