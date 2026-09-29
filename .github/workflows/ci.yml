@@ -1,7 +1,11 @@
 name: CI
 
 on:
+  # Scoped to master: a commit on a PR branch used to fire BOTH a push run and a
+  # pull_request run of this same job, doubling the Actions minutes for no extra
+  # coverage. PR branches are covered by pull_request; master by push.
   push:
+    branches: [master]
   pull_request:
   # The two long checks are manual: pluginval at strictness 10 and the mutation
   # audit each take longer than the whole build, and neither belongs on a push.
@@ -15,6 +19,12 @@ on:
         description: "Also run the mutation audit (every defect in Source/DSP/Mutate.h)"
         type: boolean
         default: false
+
+# A newer commit makes an in-flight run obsolete; without this each superseded
+# push ran its full job to completion. Never cancels on the default branch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
   linux:
