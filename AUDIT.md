@@ -1417,12 +1417,18 @@ MUT_BUILD=build-mut tools/mutation_audit.sh 21 22 23 24 25 26 27 28 29 30 31 32 
 | visual mutations 21–34 | **13 killed, 1 expected survivor (33), 0 unexpected**, after two were strengthened and one rubric hole was closed |
 | PNGs written | 123 591 / 101 131 / 113 882 bytes at defaults / all-minimum / all-maximum |
 | warnings on the project's own seven translation units, including the new `Tests/VisualRubric.h` | **0**, with `-Wall -Wextra -Wshadow -Wnon-virtual-dtor -Woverloaded-virtual -Wunused -Werror` — the same strict step CI runs, verified locally on all seven files |
-| CI | this repository is public, so the workflow runs; the numbers above are also all reproducible locally with the commands shown |
+| CI, run 39 on `570d5da` (ubuntu-24.04, JUCE 8.0.9, Release) | **success**: `Build tests + VST3` success, `Tests (ctest)` success — all four targets including the 58-check editor probe — `Editor probe (xvfb)` success, `Strict warnings on our own sources` success. The `pluginval` and `mutation-audit` jobs skipped, which is the manual gating working. This is the external check the private repositories in this review cannot have, and it ran the rendered-pixel rules on a different machine with a different font stack than the one they were measured on |
 
 ### Still open after wave 6a
 
-- **R6, R9, R10, R11, R13** above: five rubric rules measured, ratcheted and not met. Each needs a
-  change to the visual language, and that is 6b.
+- **R9, R10, R11, R13** above: four rubric rules measured, ratcheted at today's value and not met.
+  Each needs a change to the visual language, and that is 6b.
+- **R6's RENDERED half is not met**: 44 captions under 4.5:1 on glyph pixels, worst 2.95:1, while
+  every one of them clears the floor on its declared colour (R6d, asserted, worst 4.85:1). The
+  cause is 8.5 px type, so this closes with R9 and not on its own. R6 carries a deliberately loose
+  bound (2.0) rather than a ratchet at 2.95, because a rendered number is partly a measurement of
+  the font stack and a ratchet on it would fail for a font someone installed; R6d is the ratchet
+  that matters, and it is at the rubric's real threshold.
 - **R7's control-outline clause** is partly open: four structural pairs between 1.22:1 and 2.30:1.
 - **R13 cannot detect a meter that lies about its own scale** (mutation 33), because it is measured
   on the component's report rather than on pixels.

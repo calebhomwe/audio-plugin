@@ -97,7 +97,7 @@ xvfb-run ./build/EditorProbe_artefacts/Release/EditorProbe             # editor 
 | `MixAgentSmokeTest` | latency vs `getLatencySamples()`, real-time safety, NaN/Inf and 44.1–192 kHz × blocks 1–4096, instruments, drums, every FX module, state round-trip, all 12 presets |
 | `MixAgentAuditTest` | every control moved from min to max against a fixed stereo+MIDI probe; `operator new` armed only across `processBlock`; 1000× state round-trip; garbage/truncated/future state; a per-parameter click hunt; host-preset integrity across all 132 ordered preset pairs; the reported tail length against the measured one |
 | `MixAgentCharacterTest` | module-level measurement: compressor transfer curve/ratio/knee/attack/make-up, limiter latency and 8×-measured true peak, saturation unity gain/harmonic series/aliasing, biquad response against its analytic transfer function, delay interpolator and wobble, reverb late-field flatness and decorrelation, imager width mapping, every drum voice's spectrum/decay/velocity response, instrument tuning/aliasing/release/voice stealing |
-| `EditorProbe` | constructs the editor, drives `resized()`, the program ComboBox, all 45 knobs and all 12 toggles; asserts every continuous parameter has a control, every knob's readout changes across its range, double-click returns each knob to its parameter's default, and that simply opening the editor and running the message loop changes no parameter. Then **measures what the editor looks like**: the window is rendered into an offscreen image and checked against thirteen numeric rules — readout precision and units, clipped text, containment, overlap, text contrast on the rendered pixels, graphic contrast, hit targets, type scale, palette, the 4 px grid, dead space and meter scales — at three **parameter states** (every parameter at its default, its minimum and its maximum), because this editor is a fixed 1160x920 and what varies is the readout, not the window. Eight rules are asserted at the rubric's threshold; five are not met and are printed with their real threshold and pinned at today's value. `AGM_SHOT_DIR=<dir>` also writes a PNG and a JSON component tree per state. See `AUDIT.md`, "Wave 6a" |
+| `EditorProbe` | constructs the editor, drives `resized()`, the program ComboBox, all 45 knobs and all 12 toggles; asserts every continuous parameter has a control, every knob's readout changes across its range, double-click returns each knob to its parameter's default, and that simply opening the editor and running the message loop changes no parameter. Then **measures what the editor looks like**: the window is rendered into an offscreen image and checked against thirteen numeric rules — readout precision and units, clipped text, containment, overlap, text contrast on the rendered pixels, graphic contrast, hit targets, type scale, palette, the 4 px grid, dead space and meter scales — at three **parameter states** (every parameter at its default, its minimum and its maximum), because this editor is a fixed 1160x920 and what varies is the readout, not the window. Nine rules are asserted at the rubric's threshold; four are not met and are printed with their real threshold and pinned at today's value, and so is the rendered half of the contrast rule (every caption's declared colour clears 4.5:1; 8.5 px type does not deliver it on glyph pixels). `AGM_SHOT_DIR=<dir>` also writes a PNG and a JSON component tree per state. See `AUDIT.md`, "Wave 6a" |
 
 273 checks across the four targets (276 with `AGM_SHOT_DIR` set). Run the suites after any DSP change. `AUDIT.md` records what
 has been measured, what is still open and what could not be verified headless. `CHANGELOG.md`
@@ -272,11 +272,12 @@ Ranked; the measurements behind them are in `AUDIT.md`.
    `EditorProbe` now measures the editor's appearance as well as its wiring — thirteen numeric
    rules on the rendered pixels and the component tree — but thirteen numeric rules are not
    taste, and no human eye has seen this editor on a real screen.
-11. **Five of those thirteen rules are not met**: text contrast (44 captions under 4.5:1, worst
-   2.95:1 — 8.5 px type cannot reach the floor in any dimmed colour), nine distinct font sizes,
+11. **Four of those thirteen rules are not met, plus the rendered half of a fifth**: nine distinct font sizes,
    seven hues, all 76 laid-out components off the 4 px grid, and four meters with no labelled
-   scale. Each is measured, printed with its threshold and pinned so it cannot get worse; closing
-   any of them is a change to the visual language rather than a defect fix.
+   scale — and text contrast, where every caption's DECLARED colour clears 4.5:1 (asserted, worst
+   4.85:1) and 44 of them do not clear it on glyph pixels at 8.5 px (reported, worst 2.95:1). Each
+   is measured, printed with its threshold and pinned so it cannot get worse; closing any of them
+   is a change to the visual language rather than a defect fix.
 
 ## Licence
 
