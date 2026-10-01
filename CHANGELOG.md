@@ -1,5 +1,65 @@
 # Changelog
 
+## 2026-10-01 (wave 6a) — what the editor LOOKS like, measured
+
+This editor's own wave-5 entry closed with "the editor has still never been looked at", and the
+probe that drove it rendered the whole window and then asserted its width and height. Thirteen
+numeric rules are now measured on the component tree and on the rendered pixels, at three
+parameter states — every parameter at its default, its minimum and its maximum — because this
+editor is a fixed 1160x920 and what varies is the readout, not the window. Full workings in
+`AUDIT.md` under "Wave 6a".
+
+### Fixed
+
+- **The REVERB panel carried DECAY in seconds beside PRE-DELAY in milliseconds.** Two time units
+  in one panel is what makes two times incomparable at a glance. DECAY now reads 200–10000 ms; the
+  parameter is still seconds and the DSP call is untouched.
+- **Two readouts could not show their own value.** The limiter's ATTACK is 0.01–10 ms at one
+  decimal, so at the bottom of its range it printed "0.0 ms"; the compressor's is 0.1–100 ms at
+  zero decimals and printed "0 ms". Found only by measuring at the all-minimum state, and the
+  sibling of the N11 defect fixed in an earlier wave.
+- **Thirteen controls were under the 24 px hit-target floor**, and the eight section power
+  switches were 18x16 — the switch that turns a module on was the hardest thing on the editor to
+  hit. Now 24x24, inside the 27 px header band. 13 under 24x24 → 0.
+- **Three painted indicators were invisible.** The OFF power LED measured 1.80:1 against the panel
+  and the OFF power ring 1.22:1 — a control you cannot find when it is off — and the
+  gain-reduction meter's tick rules 1.08:1, which are that meter's only scale. Worst indicator
+  1.08:1 → 4.50:1.
+- **The secondary text colour was 3.94:1 against the panel it is read on**, under the 4.5:1 floor,
+  and it carries every knob caption, every section header, the IN/OUT labels, the MODE caption and
+  the pad strip. Same hue, lighter: 5.77:1 declared, and captions under the floor 59 → 44.
+
+### Added
+
+- `Tests/VisualRubric.h`: thirteen numeric rules — readout precision, units, clipped text,
+  containment, overlap, text and graphic contrast, hit targets, type scale, palette, 4 px grid,
+  dead space, meter scales — each returning its measured value.
+- `AGM_SHOT_DIR`: writes a PNG of the rendered editor and a JSON dump of the component tree per
+  parameter state. Off by default and free when off; the measurement is never gated.
+- A golden pixel hash per state, printed every run, recorded in `Tests/golden-shots.txt` with the
+  PNG sha256s and the environment.
+- Fourteen visual mutations (ids 21–34) in `Source/DSP/Mutate.h`, run by `tools/mutation_audit.sh`
+  under xvfb. 13 killed; 33 survives on purpose and is declared, because R13 is measured on what a
+  meter reports about its own scale rather than on its pixels.
+- Measurement seams that make the pixels and the measurement one source: `Knob::drawnTexts()`,
+  `PowerToggle::textBox()`, `Meter::scaleInfo()`, and `indicatorColours()` on the knob, the meter
+  and the power toggle, so `graphicSamples()` asks the widgets instead of repeating their colours.
+- Component ids on every knob, toggle, combo box, meter and label. The editor had set none, so
+  every finding named "(Label)" and located nothing.
+
+### Not fixed, measured and ratcheted
+
+Five rules this editor does not meet — R6 (44 captions under 4.5:1, worst 2.95:1), R9 (nine font
+sizes), R10 (seven hues), R11 (all 76 components off the 4 px grid, residual 385) and R13 (four
+meters with no labelled scale). None is asserted as passing and none is dropped: each is printed
+with its real threshold and pinned at today's value, so a later pass cannot give ground silently.
+Every one needs a change to the visual language, which is wave 6b.
+
+### Unchanged
+
+- No DSP. Every change is a display string, a bound, a colour or a decimal place.
+- Suite **227 → 270 checks, 0 failed** (273 with capture on). No assertion removed or loosened.
+
 ## 2026-09-28 (wave 5) — proving the tests can fail, and the first external validator
 
 Two halves. First, every substantive assertion group was shown to go red for a deliberate

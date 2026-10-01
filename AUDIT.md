@@ -1247,6 +1247,181 @@ printed beside it.
 
 ---
 
+
+## Wave 6a — the editor's appearance, measured
+
+This editor's own wave-5 pass closed with "the editor has still never been looked at", and the
+probe that drove it rendered a 1160x920 snapshot and then asserted `img.getWidth() == 1160 &&
+img.getHeight() == 920` — "setBounds worked", not "the editor is legible". Five passes of green
+therefore said nothing about what this editor looks like. This wave measures it: thirteen numeric
+rules, on the component tree and on the rendered pixels.
+
+The instrument is `Tests/VisualRubric.h`, run from `Tests/EditorProbe.cpp`.
+
+**Measured at three PARAMETER states, not three sizes.** This editor is a fixed 1160x920 and has
+no resize to sweep. What varies is the readout: 61 knobs print values into boxes 52 px wide, and
+`drawFitted()` condenses a string that does not fit rather than clipping it, down to a 0.55 floor
+at which it does clip. So the rubric runs with every parameter at its default, then at its
+minimum, then at its maximum. That is what found the two readouts below that print zero at the
+bottom of their range — visible in exactly one of the three states.
+
+### The rubric, measured
+
+| # | rule | threshold | defaults | all-min | all-max | asserted |
+|---|---|---|---|---|---|---|
+| R1 | readout precision | 0 | 0 | 0 | 0 | yes |
+| R2 | unitless fields / mixed time units | 0 | 0 | 0 | 0 | yes |
+| R3 | clipped text, worst overflow | 0 px | 0.0 | 0.0 | 0.0 | yes |
+| R4 | containment, worst px out | 0 px | 0 | 0 | 0 | yes |
+| R5 | overlapping sibling pairs | 0 | 0 | 0 | 0 | yes |
+| R7 | indicator contrast, worst | ≥ 3:1 | **4.50** | 4.50 | 4.50 | yes |
+| R8 | smallest interactive side | ≥ 24 px | **24** | 24 | 24 | yes |
+| R12 | largest empty rectangle | ≤ 15 % | 5.65 | 5.65 | 5.48 | yes |
+| R6 | text contrast, worst | ≥ 4.5:1 | **2.95** (44 under) | 2.95 | 2.95 | ratcheted |
+| R9 | distinct font sizes | ≤ 5 | **9** | 9 | 9 | ratcheted |
+| R10 | distinct hues | ≤ 6 | **7** | 6 | 6 | ratcheted |
+| R11 | components off the 4 px grid | 0 | **76 of 76** | 76 | 76 | ratcheted |
+| R13 | meters without a scale | 0 | **4 of 4** | 4 | 4 | ratcheted |
+
+R11 also carries an off-grid **residual** — the sum over components of
+`x%4 + y%4 + w%4 + h%4`, currently **385** — because the count is saturated and cannot move.
+Under 32x32 but at or over 24x24: 16 controls.
+
+### The defects it found, all fixed
+
+| | rule | before | after |
+|---|---|---|---|
+| D1 | R2 | the REVERB panel carried **DECAY in seconds beside PRE-DELAY in milliseconds** — two time units in one panel | DECAY reads 200–10000 ms; the parameter is still seconds, the scale argument converts the readout only |
+| D2 | — | the limiter's ATTACK is 0.01–10 ms at one decimal and printed **"0.0 ms"** at the bottom of its range; the compressor's is 0.1–100 ms at zero decimals and printed **"0 ms"** | 2 and 1 decimals. Found only by measuring at the all-minimum state |
+| D3 | R8 | **thirteen** controls under the 24 px hit-target floor; the eight section power switches were **18x16** — the switch that turns a module on was the hardest thing on the editor to hit | 24x24 inside the 27 px header band; HP/LP 48x24, MONO 64x24, the two instrument combo boxes 24 px tall. 13 under 24x24 → **0** |
+| D4 | R7 | three painted indicators under 3:1, all carrying state or a scale: the **off** power LED at **1.80:1**, the **off** power ring at **1.22:1**, and the gain-reduction meter's tick rules at **1.08:1** — those three rules are that meter's only scale | 1.08:1 → **4.50:1** |
+| D5 | R6 | `kTextDim` measured **3.94:1** declared against the panel fill it is read on, and that one colour carries every knob caption, every section header, the IN/OUT labels, the MODE caption and the pad strip | same hue, lighter: 5.77:1 declared. **59 captions under 4.5:1 → 44, worst 2.35:1 → 2.95:1** |
+
+D2 is not one of the thirteen rules. It is the sibling of N11 from an earlier wave ("ten knobs
+could only print 0 or 1"), it is objectively wrong, and it was in front of the measurement, so it
+was fixed.
+
+### The five rules this editor does not meet
+
+None is asserted as passing and none is dropped. Each is measured, printed with its real
+threshold beside it, and **ratcheted**: the assertion is "no worse than the value recorded
+today", so a later pass cannot give ground without the suite saying so. Every one needs a change
+to the visual language, which is 6b.
+
+- **R6 — 44 captions under 4.5:1, worst 2.95:1.** The cause is the type size, not the colour. At
+  8.5 px the brightest colour actually PRESENT in a glyph is an anti-aliased mid-tone, so no
+  dimmed colour reaches 4.5:1 rendered; only near-white does, and that erases the hierarchy
+  between a caption and its value. Needs a bigger type scale — which is also what R9 needs.
+- **R9 — nine font sizes: 8.5, 9.0, 9.5, 10.0, 10.5, 11.0, 15.0, 16.0, 24.0 px.** Six of them
+  inside 2.5 px of each other is noise rather than a scale, and choosing which to keep is a type
+  decision.
+- **R10 — seven hues** (six at the two extreme states): the orange accent, amber, cyan, pad blue
+  and three meter colours. A traffic-light meter legitimately needs three of those; getting to six
+  is a palette decision. The run prints each hue's modal colour and what share of its ink lands on
+  an interactive component, so 6b has the data rather than an angle.
+- **R11 — all 76 laid-out components off the 4 px grid, residual 385.** The layout is built from
+  `removeFromTop (44)`, `getRight() - 26`, `+ 7` and a seventh-of-the-width float; closing it means
+  re-deriving every coordinate in `resized()`, which is a relayout.
+- **R13 — four meters, none with a labelled tick or a reference mark.** The level meters are 14 px
+  wide and the gain-reduction meters 20; a dB scale does not fit in either. This one needs space
+  the layout does not currently have.
+
+**R7 is asserted on INDICATORS** — anything carrying state, a value or a scale — and the four
+STRUCTURAL pairs are measured and printed beside the assertion rather than hidden by it: panel
+border **1.22:1**, bevel highlight **2.30:1**, a knob's unfilled groove **1.27:1**, its tick ring
+**1.44:1**. R7's "control outlines" clause is therefore PARTLY open, and the run says so on every
+line it prints. Raising a deliberately dark design's borders and grooves to 3:1 is a change of
+visual language, not a defect fix.
+
+R12 passes at 5.5–5.7 %, and the run prints a second figure at a looser tolerance (9.4–12.6 %)
+because the first counts a 1 px panel border as ink and therefore measures the largest empty
+rectangle INSIDE a panel rather than the largest empty region. Both are under the ceiling.
+
+### Three defects in the checker itself
+
+Found while measuring, before any mutation ran:
+
+- **R3 reported "MONO" as needing 41.8 px in 34** and called it clipped. `PowerToggle` overrides
+  `drawToggleButton` entirely, so the generic "JUCE leaves room for a tick box" geometry was
+  wrong; the toggle now reports its own text box, which is 44 px wide.
+- **R6 reported MODE at 1.00:1** — background on background. MODE is CENTRED in a 134 px box and
+  the painted-text items carried no justification, so the glyph search looked at the left of the
+  box and found no glyphs at all. `PaintedText` now carries its justification and `paint()` draws
+  with it.
+- **R9 counted eleven font sizes**, two of which (15.4 and 18.2 px) the editor had never chosen —
+  they were the checker's own arithmetic for a ComboBox's font. It now asks the LookAndFeel. Nine
+  sizes, all of them real.
+
+### Part B — fourteen visual mutations
+
+Ids 21–34 in `Source/DSP/Mutate.h`, run by `tools/mutation_audit.sh` (a visual id builds and runs
+`EditorProbe` under xvfb instead of the three DSP targets). **13 of 14 killed.** Table and
+measured values in the commit; the shape of the three that did not die first time:
+
+- **29 survived because the rubric had two sources of truth**, which is the exact failure mode it
+  exists to catch. R7 was measured on a table of declared colour pairs in the editor while
+  `Meter::paint` had its own literal, so the mutation changed the literal and R7 went on reporting
+  4.50:1 for a tick now drawing at 1.08:1. The same hole existed for every knob colour. Closed
+  structurally: `Knob`, `Meter` and `PowerToggle` each own their colours, their `paint()` draws
+  from those, and `graphicSamples()` asks the widgets instead of repeating them — nine of the
+  nineteen R7 pairs moved from a hand-copied list to the widget that paints them. The golden pixel
+  hashes are unchanged by that refactor, which is the evidence it changed no pixel.
+- **32 was too weak, twice.** Turning every preview key violet REPLACED the pad blue rather than
+  adding to it; the second attempt used `0xff7d2fff`, which is hue 262° and falls in the SAME 30°
+  bucket as the navy panels. `0xffcc2fff` is 285°, a bucket nothing else occupies.
+- **21 could not be caught by R11 as written, and that is a finding about the RULE.** All 76
+  components are already off the grid, so the count is saturated. The off-grid residual was added
+  for this reason. A ratchet pinned at a saturated maximum is not a guard; it is a note.
+- **33 survives on purpose and is kept.** It makes a meter CLAIM a labelled scale and a reference
+  mark it does not draw, and nothing goes red, because R13 is measured on what each meter reports
+  about itself (`Meter::scaleInfo`) and not on its pixels. It is declared as an expected survivor
+  in `Mutate.h` and in the runner so the exit status still means something. Dropping it would have
+  hidden the limitation.
+
+### Part C — golden screenshots
+
+A golden pixel hash per state, printed on every run; `Tests/golden-shots.txt` records the three
+hashes, the three PNG sha256s, the byte sizes and the environment. Taken on the pixels rather than
+on the PNG so it does not move with zlib's compression level, and printed rather than asserted
+because glyph rasterisation depends on the installed fonts, on fontconfig, on FreeType and on
+JUCE. `AGM_SHOT_DIR` additionally writes the PNG and a JSON component tree per state; off by
+default, free when off, and the measurement is never gated.
+
+### Wave-6a verification
+
+```sh
+ctest --test-dir build --output-on-failure
+AGM_SHOT_DIR=/tmp/mix-shots xvfb-run -a ./build/EditorProbe_artefacts/Release/EditorProbe
+MUT_BUILD=build-mut tools/mutation_audit.sh 21 22 23 24 25 26 27 28 29 30 31 32 33 34
+```
+
+| what | result |
+|---|---|
+| suite before wave 6a | 153 + 12 + 50 + 12 = **227 checks, 0 failed** |
+| suite after wave 6a | 153 + 12 + 50 + 55 = **270 checks, 0 failed** |
+| with `AGM_SHOT_DIR` set | **273 checks, 0 failed** (one extra per state: the PNG and the tree were written and are non-empty) |
+| `EditorProbe` alone | 12 → **55 checks** |
+| visual mutations 21–34 | **13 killed, 1 expected survivor (33), 0 unexpected**, after two were strengthened and one rubric hole was closed |
+| PNGs written | 123 591 / 101 131 / 113 882 bytes at defaults / all-minimum / all-maximum |
+| CI | this repository is public, so the workflow runs; the numbers above are also all reproducible locally with the commands shown |
+
+### Still open after wave 6a
+
+- **R6, R9, R10, R11, R13** above: five rubric rules measured, ratcheted and not met. Each needs a
+  change to the visual language, and that is 6b.
+- **R7's control-outline clause** is partly open: four structural pairs between 1.22:1 and 2.30:1.
+- **R13 cannot detect a meter that lies about its own scale** (mutation 33), because it is measured
+  on the component's report rather than on pixels.
+- **Ten `textFromValueFunction` lambdas are dead.** `Knob::readout()` composes its own string from
+  the value, the scale and the suffix and never consults them, so `hzText`'s "20.0 kHz" never
+  appears — the knob paints "20000 Hz". Both carry a unit and neither clips, so no rule fires;
+  it is dead code that states an intention the editor does not honour. Not changed here, because
+  altering ten readouts' appearance is a 6b decision.
+- **`logoLabel` is an empty `juce::Label`** occupying the same 220x36 rectangle as the painted
+  "MIXAGENT" wordmark. It paints nothing. Reported rather than removed.
+- **Nothing has been seen by a human eye on a real screen**, and no DAW has opened this editor.
+  Thirteen numeric rules are not taste.
+
 ## Summary
 
 | # | Severity | Finding | Status |
