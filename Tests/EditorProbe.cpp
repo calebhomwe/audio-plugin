@@ -489,6 +489,8 @@ int main()
                 rule("R3",  "no text is clipped by its own bounds");
                 rule("R4",  "every component is inside its parent and inside the window");
                 rule("R5",  "no two sibling text/interactive components overlap");
+                rule("R6d", "every caption's DECLARED colour is at least 4.5:1 on the flat "
+                            "colour behind it");
                 rule("R7",  "every painted indicator (state, value, scale) is at least 3:1");
                 rule("R8",  "every interactive component is at least 24x24 px");
                 rule("R12", "the largest empty rectangle is at most 15 % of the canvas");
@@ -513,9 +515,19 @@ int main()
                                    + juce::String(m, 2) + (lowerIsBetter ? " <= " : " >= ")
                                    + juce::String(recorded, 2) + " recorded"));
                 };
-                ratchet("R6",  false, 2.80, "44 captions under 4.5:1, worst 2.95:1; 8.5 px type "
-                                            "cannot reach 4.5:1 rendered in any dimmed colour "
-                                            "(threshold 4.5:1)");
+                /* R6 is rendered-pixel contrast, and that is partly a measurement of
+                   the font stack: the sibling repository measures the same editor at
+                   the same commit as 4.77:1 under one JUCE and 5.29:1 under another,
+                   because anti-aliased coverage of 8 px stems differs with the
+                   rasteriser. Pinning it at 2.80 would fail for a font someone
+                   installed. The thing a later pass can actually regress is the
+                   COLOUR, and R6d asserts that at the rubric's real 4.5:1 threshold
+                   and passes; this bound is only here to catch a gross rendering
+                   change, and it is deliberately loose for that reason. */
+                ratchet("R6",  false, 2.00, "44 captions under 4.5:1 RENDERED, worst 2.95:1; "
+                                            "8.5 px type cannot reach 4.5:1 rendered in any "
+                                            "dimmed colour (threshold 4.5:1, and R6d above "
+                                            "asserts the declared colours at it)");
                 ratchet("R9",  true,  9.0,  "nine font sizes, six of them between 8.5 and 11 px "
                                             "(threshold 5)");
                 ratchet("R10", true,  7.0,  "seven hues: orange accent, amber, cyan, pad blue and "

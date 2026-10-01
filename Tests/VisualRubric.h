@@ -723,6 +723,37 @@ inline std::vector<Finding> measure (const Scene& sc) {
                        juce::String (failures) + " below 4.5:1; worst " + worst });
     }
 
+    /* R6d - the DECLARED contrast of every caption against the flat colour behind
+       it. R6 proper is measured on glyph pixels, which is what the rubric asks for
+       and which is also partly a measurement of the font stack: the same editor,
+       the same commit, measures 4.77:1 under one JUCE and 5.29:1 under another,
+       because anti-aliased coverage of 8 px stems differs with the rasteriser. The
+       local BACKGROUND is a flat fill and does not depend on rasterisation at all,
+       so pairing it with the colour the editor DECLARED gives the same quantity
+       without the font stack in it. R6 is the rule; R6d is the portable thing to
+       pin, so a ratchet fails for a colour someone changed and not for a font
+       someone installed. */
+    {
+        double worst = 1.0e9; int failures = 0; juce::String what;
+        for (const auto& t : sc.texts) {
+            if (t.text.trim().isEmpty()) continue;
+            const auto r = t.bounds.getIntersection (sc.canvas);
+            if (r.getWidth() < 3 || r.getHeight() < 3) continue;
+            const auto bg = modalColour (sc, r);
+            const auto fg = bg.overlaidWith (t.colour);   /* the declared colour, alpha composited */
+            const double ratio = contrastRatio (fg, bg);
+            if (ratio < 4.5) ++failures;
+            if (ratio < worst) {
+                worst = ratio;
+                what = t.owner + " \"" + t.text + "\" " + juce::String (ratio, 2) + ":1 ("
+                     + fg.toDisplayString (false) + " declared on " + bg.toDisplayString (false) + ")";
+            }
+        }
+        if (worst > 1.0e8) worst = 0.0;
+        f.push_back ({ "R6d", failures == 0, worst, 4.5,
+                       juce::String (failures) + " below 4.5:1 declared; worst " + what });
+    }
+
     /* R7 - graphic contrast: meters, indicators and control outlines >= 3:1. */
     {
         int bad = 0; double worstRatio = 1.0e9; juce::String worst;

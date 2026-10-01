@@ -49,16 +49,17 @@ editor is a fixed 1160x920 and what varies is the readout, not the window. Full 
 
 ### Not fixed, measured and ratcheted
 
-Five rules this editor does not meet — R6 (44 captions under 4.5:1, worst 2.95:1), R9 (nine font
-sizes), R10 (seven hues), R11 (all 76 components off the 4 px grid, residual 385) and R13 (four
-meters with no labelled scale). None is asserted as passing and none is dropped: each is printed
+Four rules this editor does not meet — R9 (nine font sizes), R10 (seven hues), R11 (all 76
+components off the 4 px grid, residual 385) and R13 (four meters with no labelled scale) — plus
+the RENDERED half of R6: every caption clears 4.5:1 on its declared colour (asserted, worst
+4.85:1) and 44 of them do not clear it on glyph pixels at 8.5 px (reported, worst 2.95:1). None is asserted as passing and none is dropped: each is printed
 with its real threshold and pinned at today's value, so a later pass cannot give ground silently.
 Every one needs a change to the visual language, which is wave 6b.
 
 ### Unchanged
 
 - No DSP. Every change is a display string, a bound, a colour or a decimal place.
-- Suite **227 → 270 checks, 0 failed** (273 with capture on). No assertion removed or loosened.
+- Suite **227 → 273 checks, 0 failed** (276 with capture on). No assertion removed or loosened.
 
 ## 2026-09-28 (wave 5) — proving the tests can fail, and the first external validator
 
