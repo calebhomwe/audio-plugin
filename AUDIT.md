@@ -1403,6 +1403,7 @@ MUT_BUILD=build-mut tools/mutation_audit.sh 21 22 23 24 25 26 27 28 29 30 31 32 
 | `EditorProbe` alone | 12 → **55 checks** |
 | visual mutations 21–34 | **13 killed, 1 expected survivor (33), 0 unexpected**, after two were strengthened and one rubric hole was closed |
 | PNGs written | 123 591 / 101 131 / 113 882 bytes at defaults / all-minimum / all-maximum |
+| warnings on the project's own seven translation units, including the new `Tests/VisualRubric.h` | **0**, with `-Wall -Wextra -Wshadow -Wnon-virtual-dtor -Woverloaded-virtual -Wunused -Werror` — the same strict step CI runs, verified locally on all seven files |
 | CI | this repository is public, so the workflow runs; the numbers above are also all reproducible locally with the commands shown |
 
 ### Still open after wave 6a
