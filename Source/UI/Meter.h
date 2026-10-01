@@ -1,5 +1,6 @@
 #pragma once
 #include <juce_gui_basics/juce_gui_basics.h>
+#include "../DSP/Mutate.h"
 #include "Style.h"
 #include <atomic>
 #include <cmath>
@@ -48,6 +49,43 @@ public:
             paintGr(g, dt);
     }
 
+    /* The colours this meter paints, and the pairs R7 is measured on. paint() draws
+       from these for the same reason the knob does: a literal inside paint() plus a
+       separate table in the editor is two sources of truth, and a mutation of the
+       tick colour survived R7 entirely while they were separate - the table still
+       named the colour the rule wanted to see. */
+    struct ColourPair { const char* what; juce::Colour fg, bg; bool structural; };
+
+    static juce::Colour grTickColour()
+    {
+       #if AGM_MUTATION(29)
+        // M29: the gain-reduction meter's only scale back to 1.08:1.
+        return kBorder.withAlpha(0.35f);
+       #else
+        return kTextDim.withAlpha(0.8f);
+       #endif
+    }
+    static juce::Colour grBarColour()    { return kAccent; }
+    static juce::Colour peakHoldColour() { return kText.withAlpha(0.8f); }
+
+    juce::Array<ColourPair> indicatorColours() const
+    {
+        juce::Array<ColourPair> out;
+        if (kind_ == Kind::Level)
+        {
+            out.add({ "level meter, low",      kMeterLo,         kBg, false });
+            out.add({ "level meter, high",     kMeterHi,         kBg, false });
+            out.add({ "level meter, clip",     kMeterClip,       kBg, false });
+            out.add({ "level meter peak hold", peakHoldColour(), kBg, false });
+        }
+        else
+        {
+            out.add({ "gain-reduction bar",    grBarColour(),    kBg, false });
+            out.add({ "gain-reduction tick",   grTickColour(),   kBg, false });
+        }
+        return out;
+    }
+
     /* What scale this meter carries, for R13. Reported by the meter itself rather
        than guessed by the test, so it cannot claim a tick it does not draw.
 
@@ -67,6 +105,13 @@ public:
 
     ScaleInfo scaleInfo() const
     {
+       #if AGM_MUTATION(33)
+        // M33: the meter CLAIMS a labelled scale and a reference mark it does not
+        // draw. This mutation SURVIVES, deliberately, and that is the finding: R13 is
+        // measured on what the component reports about itself, not on its pixels, so
+        // it cannot catch a meter that lies. Recorded in AUDIT.md rather than hidden.
+        return { 2, 2, true, "a scale this meter does not actually draw" };
+       #endif
         if (kind_ == Kind::Level)
             return { 0, 0, false, "60 dB bar, no ticks, no labels, no 0 dBFS reference" };
         const auto area = getLocalBounds().reduced(3);
@@ -178,7 +223,7 @@ private:
         {
             const float y = juce::jmax((float)bar.getY(),
                                        (float)bar.getBottom() - pf * (float)bar.getHeight() - 2.0f);
-            g.setColour(kText.withAlpha(0.8f));
+            g.setColour(peakHoldColour());
             g.fillRoundedRectangle(juce::Rectangle<float>((float)bar.getX(), y,
                                                           (float)bar.getWidth(), 2.0f), 1.0f);
         }
@@ -216,7 +261,7 @@ private:
                                                               barW + 4.0f,
                                                               juce::jmax(fillH, barW)), 1.5f);
 
-                g.setColour(kAccent);
+                g.setColour(grBarColour());
                 g.fillRect(juce::Rectangle<float>(x, (float)area.getY(), barW, fillH));
             }
 
@@ -229,7 +274,7 @@ private:
                    background - a scale that is not there. These three rules are
                    this meter's only scale, so they are the one thing on it that
                    has to be visible. */
-                g.setColour(kTextDim.withAlpha(0.8f));
+                g.setColour(grTickColour());
                 g.drawHorizontalLine(juce::roundToInt(y), x + barW + 2.0f, (float)area.getRight());
             }
         }

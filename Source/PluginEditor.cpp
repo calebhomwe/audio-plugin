@@ -111,7 +111,12 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
     p1F = addKnob("eq_p1_freq", "P1 F", " Hz", 0);
     p1F->textFromValueFunction = hzText;
     p1G = addKnob("eq_p1_gain", "P1 G", " dB", 1);
+   #if AGM_MUTATION(25)
+    // M25: a readout that prints the float it happens to hold.
+    p1Q = addKnob("eq_p1_q", "P1 Q", "", 7);
+   #else
     p1Q = addKnob("eq_p1_q", "P1 Q", "", 2);
+   #endif
     p2F = addKnob("eq_p2_freq", "P2 F", " Hz", 0);
     p2F->textFromValueFunction = hzText;
     p2G = addKnob("eq_p2_gain", "P2 G", " dB", 1);
@@ -127,7 +132,12 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
     satMix->textFromValueFunction = pctText;
     satOut = addKnob("sat_out", "OUT", " dB", 1);
 
+   #if AGM_MUTATION(26)
+    // M26: the compressor threshold loses its unit.
+    compT = addKnob("comp_thresh", "THRESH", "", 0);
+   #else
     compT = addKnob("comp_thresh", "THRESH", " dB", 0);
+   #endif
     compR = addKnob("comp_ratio", "RATIO", ":1", 1);
     /* 0.1..100 ms at 0 decimals printed "0 ms" at the bottom of its range: a
        readout that cannot show its own value. The sibling of the defect this
@@ -159,7 +169,12 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
        panel, which is the defect that makes two times incomparable at a glance.
        The scale argument converts for the READOUT only; the parameter is still
        seconds. 0.2..10 s reads 200..10000 ms. */
+   #if AGM_MUTATION(27)
+    // M27: DECAY back to seconds beside PRE-DELAY in milliseconds.
+    rvbDc = addKnob("rvb_decay", "DECAY", " s", 1);
+   #else
     rvbDc = addKnob("rvb_decay", "DECAY", " ms", 0, 1000.0f);
+   #endif
     rvbD = addKnob("rvb_damp", "DAMP", " %", 0, 100.0f);
     rvbD->textFromValueFunction = pctText;
     rvbW = addKnob("rvb_width", "WIDTH", " %", 0, 100.0f);
@@ -173,10 +188,22 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
     limA = addKnob("lim_attack", "ATTACK", " ms", 2);
     limR = addKnob("lim_release", "RELEASE", " ms", 0);
 
+   #if AGM_MUTATION(31)
+    // M31: a tenth font size on the editor - 9.25 px for one label.
+    padLabel.setFont(juce::Font(juce::FontOptions(9.25f, juce::Font::bold)));
+   #else
     padLabel.setFont(juce::Font(juce::FontOptions(9.0f, juce::Font::bold)));
+   #endif
     padLabel.setColour(juce::Label::textColourId, agm::ui::kTextDim);
     padLabel.setJustificationType(juce::Justification::centredRight);
+   #if AGM_MUTATION(23)
+    // M23: the pad strip's caption given more words than its box holds.
+    padLabel.setText("16 INSTRUMENTS, 12 CHROMATIC PREVIEW KEYS AND A DRUM BANK - PLAY THEM "
+                     "WITH MIDI, WITH THE MOUSE, OR WITH THE COMPUTER KEYBOARD",
+                     juce::dontSendNotification);
+   #else
     padLabel.setText("16 INSTRUMENTS - MIDI OR MOUSE", juce::dontSendNotification);
+   #endif
     addAndMakeVisible(padLabel);
 
      for (int i = 0; i < (int)agm::InstrumentBank::kCount; ++i)
@@ -229,7 +256,18 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
     std::vector<agm::ui::PadGrid::Pad> keys;
     static const char* noteNames[] = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
     for (int i = 0; i < 12; ++i)
+       #if AGM_MUTATION(32)
+        /* M32: an eighth hue on the editor - every other preview key turned magenta.
+           Two earlier attempts did not cross the threshold, and both were findings
+           about the mutation rather than about the rule: turning them ALL violet
+           REPLACED the pad blue instead of adding to it and left the count at seven,
+           and 0xff7d2fff is hue 262 deg, which falls in the SAME 30 deg bucket as the
+           navy panels. 0xffcc2fff is 285 deg, a bucket nothing else occupies. */
+        keys.push_back({ noteNames[i], 48 + i,
+                         juce::Colour(i % 2 == 0 ? 0xffcc2fff : 0xff2f7dff) });
+       #else
         keys.push_back({ noteNames[i], 48 + i, juce::Colour(0xff2f7dff) });
+       #endif
     padGrid.setPads(std::move(keys));
     addAndMakeVisible(padGrid);
 
@@ -441,22 +479,23 @@ MixAgentAudioProcessorEditor::graphicSamples() const
     out.add({ "panel fill over canvas",    panelMid,   kBg,      true  });
     out.add({ "panel border",              kBorder,    panelMid, false, true });
     out.add({ "panel top highlight",       juce::Colours::white.withAlpha(0.25f), panelMid, false, true });
-    out.add({ "knob track (unfilled groove)", kBorder, kPanel,   false, true });
-    out.add({ "knob tick ring",            kTextDim.withAlpha(0.30f), kPanel, false, true });
     out.add({ "header rule under a title", kAccent,    panelMid, false });
-    out.add({ "knob value arc",            kAccentHot, kPanel,   false });
-    out.add({ "knob needle",               kText,      juce::Colour(0xff16161c), false });
-    out.add({ "power LED, off",            kTextDim,   panelMid, false });
-    out.add({ "power LED, on",             kAccent,    panelMid, false });
-    out.add({ "power ring, off",           kTextDim,   panelMid, false });
-    out.add({ "level meter, low",          kMeterLo,   kBg,      false });
-    out.add({ "level meter, high",         kMeterHi,   kBg,      false });
-    out.add({ "level meter, clip",         kMeterClip, kBg,      false });
-    out.add({ "level meter peak hold",     kText.withAlpha(0.8f), kBg, false });
-    out.add({ "gain-reduction bar",        kAccent,    kBg,      false });
-    out.add({ "gain-reduction tick",       kTextDim.withAlpha(0.8f), kBg, false });
+    out.add({ "power LED, off",            PowerToggle::ledOffColour(),  panelMid, false });
+    out.add({ "power LED, on",             PowerToggle::ledOnColour(),   panelMid, false });
+    out.add({ "power ring, off",           PowerToggle::ringOffColour(), panelMid, false });
     out.add({ "drum panel cyan rule",      kCyan,      panelMid, false });
     out.add({ "pad, lit",                  kPadLit,    kPanel,   false });
+    /* The knobs' and the meters' own colours come from the widgets that paint them.
+       A colour literal inside Knob::paint or Meter::paint plus a separate list here
+       is two sources of truth, and a mutation of the gain-reduction tick survived R7
+       untouched while they were separate: the table still named the colour the rule
+       wanted to see. */
+    for (const auto& cp : Knob::indicatorColours())
+        out.add({ cp.what, cp.fg, cp.bg, false, cp.structural });
+    for (const auto& cp : inMeter.indicatorColours())
+        out.add({ cp.what, cp.fg, cp.bg, false, cp.structural });
+    for (const auto& cp : compMeter.indicatorColours())
+        out.add({ cp.what, cp.fg, cp.bg, false, cp.structural });
     return out;
 }
 
@@ -517,14 +556,31 @@ void MixAgentAudioProcessorEditor::resized()
     /* 24x24, not 18x16. Thirteen controls on this editor were under the 24 px hit
        target floor and the eight section power switches were the smallest at
        18x16. The header band is 27 px tall, so 24 px at y+2 still sits inside it. */
+   #if AGM_MUTATION(28)
+    // M28: the EQ power switch back to 18x16, under the 24 px hit-target floor.
+    powerToggles[0]->setBounds(eqSection.getRight() - 30, eqSection.getY() + 7, 18, 16);
+   #else
     powerToggles[0]->setBounds(eqSection.getRight() - 34, eqSection.getY() + 2, 24, 24);
+   #endif
 
+   #if AGM_MUTATION(34)
+    // M34: the EQ display and its knob row are never laid out, so the whole
+    // equaliser section is empty canvas.
+    spectrum.setBounds(0, 0, 0, 0);
+   #else
     spectrum.setBounds(eqSection.getX() + 10, eqSection.getY() + 32, eqSection.getWidth() - 20, 98);
+   #endif
 
     const int knobY = eqSection.getY() + 138;
     const float cw = (float)eqSection.getWidth() / 7.0f;
     auto cx = [&](int i) { return eqSection.getX() + (i + 0.5f) * cw; };
 
+   #if AGM_MUTATION(34)
+    for (auto* k : { hpKnob, lpKnob, lsfF, lsfG, hsfF, hsfG, p1F, p1G, p1Q, p2F, p2G, p2Q, p3F, p3G, p3Q })
+        k->setBounds(0, 0, 0, 0);
+    hpToggle->setBounds(0, 0, 0, 0);
+    lpToggle->setBounds(0, 0, 0, 0);
+   #else
     hpKnob->setBounds((int)cx(0) - 2, knobY, 50, 72);
     hpToggle->setBounds((int)cx(0) - 56, knobY + 24, 48, 24);
     lpKnob->setBounds((int)cx(6) - 2, knobY, 50, 72);
@@ -534,6 +590,7 @@ void MixAgentAudioProcessorEditor::resized()
     placeKnobs(cx(3), knobY, { p2F, p2G, p2Q });
     placeKnobs(cx(4), knobY, { p3F, p3G, p3Q });
     placeKnobs(cx(5), knobY, { hsfF, hsfG });
+   #endif
 
     const int panelGap = 10;
     const int panelY = modulesRow.getY();
@@ -586,16 +643,34 @@ void MixAgentAudioProcessorEditor::resized()
     limMeter.setBounds(panels[5].getRight() - 28, row1, 20, contentH);
     placeKnobs(limArea.getCentreX(), row1, { limC }, kw, kh);
     placeKnobs(limArea.getCentreX(), row2, { limA }, kw, kh);
+   #if AGM_MUTATION(30)
+    // M30: the limiter's RELEASE knob pushed 6 px past the right edge of the window.
+    limR->setBounds(getWidth() - kw + 6, row3, kw, kh);
+   #else
     placeKnobs(limArea.getCentreX(), row3, { limR }, kw, kh);
+   #endif
 
     powerToggles[7]->setBounds(drumRow.getX() + 6, drumRow.getY() + 2, 24, 24);
     instProgramCombo.setBounds(drumRow.getX() + 210, drumRow.getY() + 3, 110, 24);
+   #if AGM_MUTATION(24)
+    // M24: the filter combo box moved one pixel into the program combo box beside it.
+    instFilterCombo.setBounds(drumRow.getX() + 319, drumRow.getY() + 3, 76, 24);
+   #else
     instFilterCombo.setBounds(drumRow.getX() + 326, drumRow.getY() + 3, 76, 24);
+   #endif
     favToggle.setBounds(drumRow.getX() + 408, drumRow.getY() + 2, 58, 26);
     instLevel->setBounds(drumRow.getX() + 474, drumRow.getY() + 2, 54, 64);
     drumLevel->setBounds(drumRow.getX() + 530, drumRow.getY() + 2, 54, 64);
     padLabel.setBounds(drumRow.getX() + 594, drumRow.getY() + 7, drumRow.getWidth() - 604, 16);
+   #if AGM_MUTATION(21)
+    // M21: the pad grid shifted 3 px off the 4 px grid. The off-grid COUNT cannot
+    // see this - all 76 laid-out components are already off the grid - which is why
+    // the probe also measures the total off-grid RESIDUAL, a quantity that is not
+    // saturated and can therefore move in both directions.
+    padGrid.setBounds(drumRow.withTrimmedTop(72).reduced(8, 6).translated(0, 3));
+   #else
     padGrid.setBounds(drumRow.withTrimmedTop(72).reduced(8, 6));
+   #endif
 }
 
 void MixAgentAudioProcessorEditor::timerCallback()

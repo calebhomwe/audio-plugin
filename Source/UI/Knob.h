@@ -44,11 +44,11 @@ public:
         const float thickness = juce::jmax(2.5f, side * 0.075f);
         const juce::PathStrokeType stroke(thickness, juce::PathStrokeType::curved, juce::PathStrokeType::rounded);
 
-        const juce::Colour accentTop(hot ? 0xffffc07a : 0xffffa640);
-        const juce::Colour accentBottom(hot ? 0xffff8b3d : 0xffff6b1a);
-        const juce::Colour glowTint(0x33ff6b1a);
-        const juce::Colour faceLight(hot ? 0xff36363f : 0xff33333d);
-        const juce::Colour faceDark(hot ? 0xff1c1c22 : 0xff16161c);
+        const juce::Colour accentTop(hot ? kArcTopHot : kArcTop);
+        const juce::Colour accentBottom(hot ? kArcBottomHot : kArcBottom);
+        const juce::Colour glowTint(kArcGlow);
+        const juce::Colour faceLight(hot ? kFaceLightHot : kFaceLight);
+        const juce::Colour faceDark(hot ? kFaceDarkHot : kFaceDark);
 
         const float sinV = std::sin(valueAngle);
         const float cosV = std::cos(valueAngle);
@@ -62,11 +62,11 @@ public:
                                       true);
             g.setFillType(juce::FillType(face));
             g.fillEllipse(centre.getX() - discR, centre.getY() - discR, discR * 2.0f, discR * 2.0f);
-            g.setColour(kBorder.brighter(hot ? 0.12f : 0.0f));
+            g.setColour(juce::Colour(kDiscOutline).brighter(hot ? 0.12f : 0.0f));
             g.drawEllipse(centre.getX() - discR, centre.getY() - discR, discR * 2.0f, discR * 2.0f, 1.0f);
         }
 
-        g.setColour(kTextDim.withAlpha(0.30f));
+        g.setColour(tickColour());
         for (int i = 0; i < 5; ++i)
         {
             const float a = arcOffset + (float)i / 4.0f * (endAngle - startAngle);
@@ -78,7 +78,7 @@ public:
         juce::Path track;
         track.addCentredArc(centre.getX(), centre.getY(), radius, radius, 0.0f,
                             arcOffset, arcOffset + (endAngle - startAngle), true);
-        g.setColour(kBorder);
+        g.setColour(trackColour());
         g.strokePath(track, stroke);
 
         if (prop > 0.002f)
@@ -111,7 +111,7 @@ public:
             juce::Path stroked;
             juce::PathStrokeType(2.0f, juce::PathStrokeType::beveled,
                                  juce::PathStrokeType::rounded).createStrokedPath(stroked, needle);
-            g.setColour(kText);
+            g.setColour(needleColour());
             g.fillPath(stroked);
         }
 
@@ -159,11 +159,33 @@ public:
         return out;
     }
 
-    /* The knob's dial, for R7: the value arc and the track it sits on. */
-    juce::Colour trackColour()     const { return kBorder; }
-    juce::Colour valueArcColour()  const { return juce::Colour(0xffff6b1a); }
-    juce::Colour needleColour()    const { return kText; }
-    juce::Colour faceColour()      const { return juce::Colour(0xff16161c); }
+    /* The dial's own colours, and the pairs R7 is measured on. paint() draws from
+       these: a colour literal inside paint() and a separate table in the editor are
+       two sources that can disagree, which is how a mutation of a rim colour once
+       survived a rule that was supposed to be measuring it. */
+    static constexpr juce::uint32 kArcTop       = 0xffffa640, kArcTopHot    = 0xffffc07a;
+    static constexpr juce::uint32 kArcBottom    = 0xffff6b1a, kArcBottomHot = 0xffff8b3d;
+    static constexpr juce::uint32 kArcGlow      = 0x33ff6b1a;
+    static constexpr juce::uint32 kFaceLight    = 0xff33333d, kFaceLightHot = 0xff36363f;
+    static constexpr juce::uint32 kFaceDark     = 0xff16161c, kFaceDarkHot  = 0xff1c1c22;
+    static constexpr juce::uint32 kDiscOutline  = 0xff2a2a34;
+
+    static juce::Colour trackColour()  { return juce::Colour(kDiscOutline); }
+    static juce::Colour tickColour()   { return kTextDim.withAlpha(0.30f); }
+    static juce::Colour needleColour() { return kText; }
+    static juce::Colour faceColour()   { return juce::Colour(kFaceDark); }
+
+    struct ColourPair { const char* what; juce::Colour fg, bg; bool structural; };
+
+    static juce::Array<ColourPair> indicatorColours()
+    {
+        juce::Array<ColourPair> out;
+        out.add({ "knob track (unfilled groove)", trackColour(),            faceColour(), true  });
+        out.add({ "knob tick ring",               tickColour(),             faceColour(), true  });
+        out.add({ "knob value arc",               juce::Colour(kArcBottom), faceColour(), false });
+        out.add({ "knob needle",                  needleColour(),           faceColour(), false });
+        return out;
+    }
 
     juce::String readout() const
     {

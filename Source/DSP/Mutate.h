@@ -35,6 +35,30 @@
 //  19   ScopedNoDenormals removed from processBlock               (performance only - see AUDIT.md)
 //  20   one parameter left out of the state restore                state restoration, all parameters
 //
+// Wave 6a adds 21-34: defects in the editor's APPEARANCE rather than in the DSP.
+// Each one must turn a rule of the visual rubric red with a measured value; the rig
+// is Tests/VisualRubric.h and the runner is Tests/EditorProbe.cpp (needs a display).
+//
+//  21   one control 3 px off the 4 px grid                     R11 off-grid residual
+//  22   the secondary text colour back to 3.94:1 declared      R6 text contrast
+//  23   a caption given more words than its box holds          R3 clipped text
+//  24   two combo boxes overlapping by one pixel               R5 sibling overlap
+//  25   a readout printing the float it happens to hold        R1 readout precision
+//  26   the compressor threshold loses its unit                R2 units
+//  27   reverb DECAY back to s beside PRE-DELAY in ms          R2 unit consistency
+//  28   a power switch back to 18x16                           R8 hit targets, R11
+//  29   the gain-reduction meter's only scale back to 1.08:1   R7 indicator contrast
+//  30   a knob pushed 6 px past the right edge of the window   R4 containment
+//  31   a tenth font size on the editor                        R9 type scale
+//  32   an eighth hue on the editor                            R10 palette
+//  33   a meter CLAIMING a scale it does not draw              (nothing - see below)
+//  34   a whole panel left without content                     R12 dead space, R3, R8
+//
+// 33 SURVIVES, deliberately, and that is the finding: R13 is measured on what each
+// meter REPORTS about itself (Meter::scaleInfo), not on its pixels, so it cannot
+// catch a meter that lies about its own scale. Written up in AUDIT.md rather than
+// hidden by dropping the mutation.
+//
 // Run the whole table with:
 //   tools/mutation_audit.sh
 // ---------------------------------------------------------------------------

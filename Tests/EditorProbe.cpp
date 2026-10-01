@@ -520,7 +520,28 @@ int main()
                                             "(threshold 5)");
                 ratchet("R10", true,  7.0,  "seven hues: orange accent, amber, cyan, pad blue and "
                                             "three meter colours (threshold 6)");
-                ratchet("R11", true,  76.0, "76 of 77 components off the 4 px grid (threshold 0)");
+                ratchet("R11", true,  76.0, "all 76 laid-out components off the 4 px grid "
+                                            "(threshold 0)");
+                // R11's COUNT is saturated - every laid-out component is already off the
+                // grid - so the ratchet on it cannot detect anything getting worse. The
+                // total off-grid RESIDUAL can: it is the sum over components of
+                // (x%4 + y%4 + w%4 + h%4), which moves whenever any bound moves. This is
+                // the quantity a grid mutation is actually measured against.
+                {
+                    int residual = 0, placed = 0;
+                    for (const auto& n : sc.nodes)
+                    {
+                        if (n.parent < 0 || !n.visible) continue;
+                        ++placed;
+                        residual += n.bounds.getX() % 4 + n.bounds.getY() % 4
+                                  + n.bounds.getWidth() % 4 + n.bounds.getHeight() % 4;
+                    }
+                    std::cout << "  R11 residual " << residual << " over " << placed
+                              << " placed components (0 would be a perfect 4 px grid)\n";
+                    check(residual <= 385,
+                          vmsg(juce::String(cs.name) + ": R11 off-grid residual is pinned at its "
+                               "recorded value, measured " + juce::String(residual) + " <= 385"));
+                }
                 ratchet("R13", true,  4.0,  "four meters, none with a labelled scale or a reference "
                                             "mark (threshold 0)");
             }
