@@ -1,0 +1,40 @@
+Wave 6a, Part C: golden screenshots of MixAgent's editor.
+
+EditorProbe renders the editor at three PARAMETER states - every parameter at its
+default, at its minimum, at its maximum - and prints an FNV-1a 64 hash of the
+rendered ARGB pixels for each on every run ("golden pixel hash ..."). The editor is
+a fixed 1160x920, so the parameter value is its axis of variation: sixty-one
+readouts whose width changes with their value, in boxes 52 px wide. A readout that
+fits at its default and is condensed to illegibility at its maximum is invisible if
+you only ever look at the defaults.
+
+With AGM_SHOT_DIR set it also writes, per state, the PNG and a JSON dump of the
+component tree: id, class, bounds, parent, visibility, font size, text, colour and
+required width of every string, every meter's scale, and every graphic colour pair
+with its composited contrast.
+
+The pixel hash is taken on the PIXELS, not on the PNG file, so it does not move
+with zlib's compression level. The PNG sha256 is recorded too, because that is what
+a reviewer can check with sha256sum without building anything.
+
+WHAT THESE NUMBERS ARE AND ARE NOT
+A change detector, not a portable gate, and printed rather than asserted. Glyph
+rasterisation depends on the installed fonts, on fontconfig, on FreeType's version
+and on JUCE's. A hard assertion would fail on another machine for reasons that have
+nothing to do with the editor. Compare them on the same environment, recorded below.
+
+ENVIRONMENT
+  Linux 6.18.44-fc-v50 x86_64
+  JUCE 8.0.9 (FETCHCONTENT_SOURCE_DIR_JUCE=/home/user/JUCE)
+  g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+  CMAKE_BUILD_TYPE=Release, MIXAGENT_MUTATE=0, MIXAGENT_REVERB_FDN=OFF
+  rendered headless under Xvfb (xvfb-run -a)
+
+STATE         CANVAS      PIXEL HASH         PNG BYTES  PNG SHA-256
+defaults      1160x920    56df12ab77ea34bf   123591     e093236e7a2c1924f18c9e53025877e520697678f8f7eb98ac7bddf082fff904
+all-minimum   1160x920    2e331044b9973954   101131     fec5b996a3858607bac6ef3427f7fe2d517a0aea8ef3becebc3f2a64f1235f88
+all-maximum   1160x920    516a684786cded3e   113882     f7e14b619cf61d0c966f76b227012d3e2752c2808b8e6ac557b90101e1ed43bd
+
+To regenerate:
+  AGM_SHOT_DIR=/tmp/mix-shots xvfb-run -a ./build/EditorProbe_artefacts/Release/EditorProbe
+  sha256sum /tmp/mix-shots/*.png

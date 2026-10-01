@@ -137,6 +137,7 @@ target_sources(EditorProbe PRIVATE
     ${AGM_SOURCES})
 target_compile_features(EditorProbe PRIVATE cxx_std_17)
 target_compile_definitions(EditorProbe PRIVATE JUCE_MODAL_LOOPS_PERMITTED=1)
+# Tests/VisualRubric.h is included as "Tests/VisualRubric.h", like the Source headers.
 target_include_directories(EditorProbe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(EditorProbe PRIVATE
     juce::juce_dsp)
