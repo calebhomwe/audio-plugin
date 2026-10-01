@@ -9,7 +9,26 @@ FetchContent_Declare(juce
     GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(juce)
 
-add_compile_definitions(JUCE_VST3_CAN_REPLACE_VST2=0)
+add_compile_definitions(JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+
+# Owner's Windows workflow copies the built plugin into the system VST3 folder.
+# Headless / CI builds turn this off: -DMIXAGENT_COPY_PLUGIN=OFF
+option(MIXAGENT_COPY_PLUGIN "Copy the plugin into the system plugin folder after build" ON)
+# Address/UB sanitizers on the headless test targets: -DMIXAGENT_SANITIZE=ON
+option(MIXAGENT_SANITIZE "Build the console test apps with -fsanitize=address,undefined" OFF)
+
+# Mutation audit: compile exactly one deliberate defect into the DSP so the test
+# suite can be shown to catch it. 0 (the default) injects nothing at all. The
+# table of defects is in Source/DSP/Mutate.h; run them all with
+# tools/mutation_audit.sh.
+set(MIXAGENT_MUTATE "0" CACHE STRING "Inject one deliberate defect for the mutation audit (0 = none)")
+
+# Which reverb tank the plugin uses: the comb bank (default) or the feedback
+# delay network offered beside it. ReverbProbe measures both either way.
+option(MIXAGENT_REVERB_FDN "Use the FDN reverb tank instead of the comb bank" OFF)
+if(NOT MIXAGENT_MUTATE STREQUAL "0")
+    message(WARNING "MixAgent: MUTATION BUILD - defect #${MIXAGENT_MUTATE} is compiled in. Never ship this.")
+endif()
 
 set(AGM_SOURCES
     Source/PluginProcessor.cpp
@@ -23,7 +42,7 @@ juce_add_plugin(MixAgent
     IS_SYNTH TRUE
     NEEDS_MIDI_INPUT TRUE
     NEEDS_MIDI_OUTPUT FALSE
-    COPY_PLUGIN_AFTER_BUILD TRUE
+    COPY_PLUGIN_AFTER_BUILD ${MIXAGENT_COPY_PLUGIN}
     FORMATS VST3 Standalone
     VERSION 1.0.0)
 
@@ -38,12 +57,34 @@ target_link_libraries(MixAgent PRIVATE
     juce::juce_gui_extra
     juce::juce_audio_devices)
 
+# Only our own translation units carry the mutation define, so switching it does
+# not rebuild the JUCE modules.
+# The compressor's RMS-branch window, in ms. Empty = the shipped default. Only
+# here so the crest-independence / attack-floor trade-off can be re-measured.
+set(MIXAGENT_COMP_RMS_MS "" CACHE STRING "Override the compressor's RMS window in ms (empty = default)")
+
+set(AGM_OWN_DEFS MIXAGENT_MUTATE=${MIXAGENT_MUTATE})
+if(NOT MIXAGENT_COMP_RMS_MS STREQUAL "")
+    list(APPEND AGM_OWN_DEFS AGM_COMP_RMS_MS=${MIXAGENT_COMP_RMS_MS})
+endif()
+if(MIXAGENT_REVERB_FDN)
+    list(APPEND AGM_OWN_DEFS MIXAGENT_REVERB_FDN=1)
+endif()
+set_source_files_properties(
+    Source/PluginProcessor.cpp Source/PluginEditor.cpp
+    Tests/SmokeTest.cpp Tests/AuditTest.cpp Tests/CharacterTest.cpp Tests/EditorProbe.cpp
+    Tests/ReverbProbe.cpp
+    PROPERTIES COMPILE_DEFINITIONS "${AGM_OWN_DEFS}")
+
+enable_testing()
+
 juce_add_console_app(MixAgentSmokeTest)
 juce_generate_juce_header(MixAgentSmokeTest)
 target_sources(MixAgentSmokeTest PRIVATE
     Tests/SmokeTest.cpp
     ${AGM_SOURCES})
 target_compile_features(MixAgentSmokeTest PRIVATE cxx_std_17)
+target_compile_definitions(MixAgentSmokeTest PRIVATE JUCE_MODAL_LOOPS_PERMITTED=1)   # runDispatchLoopUntil in tests
 target_link_libraries(MixAgentSmokeTest PRIVATE
     juce::juce_audio_basics
     juce::juce_audio_processors
@@ -53,12 +94,50 @@ target_link_libraries(MixAgentSmokeTest PRIVATE
     juce::juce_gui_extra
     juce::juce_audio_devices)
 
+juce_add_console_app(MixAgentAuditTest)
+juce_generate_juce_header(MixAgentAuditTest)
+target_sources(MixAgentAuditTest PRIVATE
+    Tests/AuditTest.cpp
+    ${AGM_SOURCES})
+target_compile_features(MixAgentAuditTest PRIVATE cxx_std_17)
+target_compile_definitions(MixAgentAuditTest PRIVATE JUCE_MODAL_LOOPS_PERMITTED=1)
+target_link_libraries(MixAgentAuditTest PRIVATE
+    juce::juce_audio_basics
+    juce::juce_audio_processors
+    juce::juce_audio_utils
+    juce::juce_dsp
+    juce::juce_gui_basics
+    juce::juce_gui_extra
+    juce::juce_audio_devices)
+
+juce_add_console_app(MixAgentCharacterTest)
+juce_generate_juce_header(MixAgentCharacterTest)
+target_sources(MixAgentCharacterTest PRIVATE Tests/CharacterTest.cpp)
+target_compile_features(MixAgentCharacterTest PRIVATE cxx_std_17)
+target_link_libraries(MixAgentCharacterTest PRIVATE
+    juce::juce_audio_basics
+    juce::juce_audio_processors
+    juce::juce_dsp)
+
+# Reverb topology bench: not a pass/fail test, the instrument the comb-bank vs
+# FDN decision was made with. Not registered with add_test.
+juce_add_console_app(ReverbProbe)
+juce_generate_juce_header(ReverbProbe)
+target_sources(ReverbProbe PRIVATE Tests/ReverbProbe.cpp)
+target_compile_features(ReverbProbe PRIVATE cxx_std_17)
+target_link_libraries(ReverbProbe PRIVATE
+    juce::juce_audio_basics
+    juce::juce_audio_processors
+    juce::juce_dsp)
+
 juce_add_console_app(EditorProbe)
 juce_generate_juce_header(EditorProbe)
 target_sources(EditorProbe PRIVATE
     Tests/EditorProbe.cpp
     ${AGM_SOURCES})
 target_compile_features(EditorProbe PRIVATE cxx_std_17)
+target_compile_definitions(EditorProbe PRIVATE JUCE_MODAL_LOOPS_PERMITTED=1)
+# Tests/VisualRubric.h is included as "Tests/VisualRubric.h", like the Source headers.
 target_include_directories(EditorProbe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(EditorProbe PRIVATE
     juce::juce_dsp)
@@ -69,3 +148,22 @@ target_link_libraries(EditorProbe PRIVATE
     juce::juce_gui_basics
     juce::juce_gui_extra
     juce::juce_audio_devices)
+
+if(MIXAGENT_SANITIZE AND NOT MSVC)
+    foreach(t MixAgentSmokeTest MixAgentAuditTest MixAgentCharacterTest EditorProbe)
+        target_compile_options(${t} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(${t} PRIVATE -fsanitize=address,undefined)
+    endforeach()
+endif()
+
+add_test(NAME MixAgentSmokeTest COMMAND MixAgentSmokeTest)
+add_test(NAME MixAgentAuditTest COMMAND MixAgentAuditTest)
+add_test(NAME MixAgentCharacterTest COMMAND MixAgentCharacterTest)
+
+# The editor probe needs a display; on Linux run it under xvfb-run when available.
+find_program(MIXAGENT_XVFB_RUN xvfb-run)
+if(MIXAGENT_XVFB_RUN)
+    add_test(NAME EditorProbe COMMAND ${MIXAGENT_XVFB_RUN} -a $<TARGET_FILE:EditorProbe>)
+else()
+    add_test(NAME EditorProbe COMMAND EditorProbe)
+endif()

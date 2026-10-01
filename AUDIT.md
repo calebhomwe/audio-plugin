@@ -1,0 +1,1492 @@
+# MixAgent — audit
+
+**Status: every finding below is marked either FIXED (with the after-measurement) or
+LEFT OPEN (with the reason). Summary table at the bottom.**
+
+Headless audit on Linux (gcc 13, JUCE 8.0.9, Release). Every finding below names a
+`file:line`, a mechanism, and the command whose output proves it. Things I only suspect are
+in a separate list at the end and are labelled as such.
+
+Reproduce everything with:
+
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DMIXAGENT_COPY_PLUGIN=OFF \
+      -DFETCHCONTENT_SOURCE_DIR_JUCE=/path/to/JUCE
+cmake --build build -j3
+./build/MixAgentSmokeTest_artefacts/Release/MixAgentSmokeTest      # end-to-end plugin behaviour
+./build/MixAgentAuditTest_artefacts/Release/MixAgentAuditTest      # dead knobs, allocations, torture, presets
+./build/MixAgentCharacterTest_artefacts/Release/MixAgentCharacterTest   # per-module characterisation
+xvfb-run -a ./build/EditorProbe_artefacts/Release/EditorProbe           # editor wiring and readouts
+```
+
+27 findings: 6 CRITICAL, 8 MAJOR, 13 MINOR, plus a COSMETIC list and an unproven list.
+The wave-4 and wave-5 sections near the end carry the later work; C5 (wave 5, found by
+pluginval) is written up there.
+
+---
+
+## Instruments built for this audit
+
+| Instrument | Where | What it proves |
+|---|---|---|
+| Dead-parameter sweep | `Tests/AuditTest.cpp` `deadKnobSuite` | all 58 controls, min vs max, RMS and peak difference in dB |
+| Allocation detector | `Tests/AuditTest.cpp` `allocationSuite` | `operator new` armed only across `processBlock`, 24 rate/block combinations |
+| State/automation torture | `Tests/AuditTest.cpp` `tortureSuite` | 1000x round-trip, garbage/truncated/future state, per-parameter click hunt |
+| Preset integrity | `Tests/AuditTest.cpp` `presetSuite` | every ordered pair of host presets vs a fresh load |
+| Reported tail | `Tests/AuditTest.cpp` `tailSuite` | `getTailLengthSeconds()` against the measured -60 dB tail |
+| Module characterisation | `Tests/CharacterTest.cpp` | transfer curves, harmonic series, RT60, true peak, drum/voice spectra |
+
+---
+
+## CRITICAL
+
+### C1 — Make-up gain does nothing. `Source/DSP/Compressor.h:108-110`
+
+```cpp
+float wetGain = dbToGain(mk - gr);
+if (!(wetGain < 1.0f))
+    wetGain = 1.0f;          // <- the make-up term can never raise the gain above unity
+```
+
+The clamp that is meant to stop the gain computer from *boosting* also throws away the
+make-up gain, because make-up and gain reduction share one `wetGain`. Below threshold the
+knob is inert; above threshold it can only claw back part of the reduction.
+
+Proof (`MixAgentCharacterTest`, signal 20 dB below threshold):
+
+```
+make-up gain with the signal 20 dB below threshold:
+  knob +  0.0 dB -> measured    0.00 dB
+  knob +  3.0 dB -> measured    0.00 dB
+  knob +  6.0 dB -> measured    0.00 dB
+  knob + 12.0 dB -> measured    0.00 dB
+  knob + 24.0 dB -> measured    0.00 dB
+```
+
+Four factory presets set `comp_makeup` (1.5–2.5 dB) and get nothing for it.
+
+**FIXED.** Gain reduction and make-up are separate factors now; the clamp applies only to the
+reduction. After: `0.00 / 3.00 / 6.00 / 12.00 / 24.00 dB`.
+
+### C2 — Img Width is a lie over 99 % of its range. `Source/PluginProcessor.cpp:75,151` + `Source/DSP/StereoImager.h:80`
+
+The parameter is declared `0..200` (a percentage) and handed straight to
+`StereoImager::setWidth`, which clamps to `0..2` (a linear side-gain multiplier). So the
+knob saturates at 2 % and the **default position, 100 %, is 200 % width**.
+
+Proof (`MixAgentCharacterTest`):
+
+```
+  width      0 % -> side gain   0.000 (-240.00 dB)
+  width     25 % -> side gain   1.998 (6.01 dB)
+  width     50 % -> side gain   1.998 (6.01 dB)
+  width    100 % -> side gain   1.998 (6.01 dB)
+  width    200 % -> side gain   1.998 (6.01 dB)
+```
+
+The dead-knob sweep shows the same thing from the other end: `img_width` and `img_mono`
+produce *identical* differences (-3.42 dB RMS / -5.08 dB peak), because both are really
+comparing "mono" against "width 2".
+
+Consequence: switching the imager on at its default doubles the side signal — a 6 dB image
+blow-up and a mono-compatibility problem. Presets 4, 7 and 9 ask for 140/135/150 % and all
+get 200 %.
+
+**FIXED.** `setWidth` became `setWidthPercent` and divides by 100. After:
+`0.000 / 0.250 / 0.500 / 0.749 / 0.999 / 1.499 / 1.998` for 0/25/50/75/100/150/200 %.
+Behaviour change: an existing session with the imager engaged loses 6 dB of side signal,
+because it was never supposed to have it.
+
+### C3 — Input/Output gain smoothing is block-size dependent. `Source/PluginProcessor.cpp:380`
+
+```cpp
+const float gainCoef = 1.0f - std::exp(-(float)numSamples / (0.010f * (float)sampleRate));
+...
+for (int i = 0; i < numSamples; ++i) { g += (inTarget - g) * gainCoef; ... }
+```
+
+The coefficient is derived for a whole *block* (`numSamples`) but applied once per *sample*,
+so the smoothing runs roughly `numSamples` times too fast: at 48 kHz with a 64-sample block
+the "10 ms" ramp settles in about 8 samples, and at 512 samples in about 4.
+
+Proof (`MixAgentAuditTest`, per-parameter click hunt; a 440 Hz sine at 0.3 steps by 0.017
+per sample of its own accord):
+
+```
+  out_gain        0.2735
+  in_gain         0.1832
+```
+
+**FIXED.** The coefficient is per sample now. After: `out_gain 0.0901, in_gain 0.0626`.
+
+### C4 — Compressor threshold and ratio are not smoothed at all. `Source/DSP/Compressor.h:133-134`
+
+`thresholdDb` and `ratio` are read raw into `tDb`/`slopeFactor` once per block. Everything
+else in the module (make-up, mix, bypass) is smoothed; these two are not, so automating them
+steps the gain instantly.
+
+Proof (same click hunt):
+
+```
+  comp_thresh     0.4116
+  comp_ratio      0.3418
+```
+
+**FIXED.** Both are one-poled at the same 15 ms as make-up (the ratio via its slope, so there
+is no per-sample division). After: `comp_thresh 0.0155, comp_ratio 0.0155`.
+
+---
+
+## MAJOR
+
+### M1 — The "GM drum map" is three sounds wearing ten names. `Source/DSP/DrumEngine.h:55,139,162`
+
+`Voice::note` (line 139) is declared and never written. `familyForNote` picks one of three
+recipes and the note number is then discarded, so every note in a family renders the *same
+waveform*.
+
+Proof (`MixAgentCharacterTest`):
+
+```
+ note  voice        peak dB   f0 Hz   centroid Hz   -20 dB ms   -60 dB ms
+   36  kick            -4.3     96.1           95       233.0      1110.0
+   41  low tom         -4.3     96.1           95       233.0      1110.0
+   45  mid tom         -4.3     96.1           95       233.0      1110.0
+   48  hi tom          -4.3     96.1           95       233.0      1110.0
+   38  snare           -4.9    161.2          219       209.0       555.0
+   39  clap            -4.9    161.2          219       209.0       555.0
+   49  crash           -4.9    161.2          219       209.0       555.0
+   42  closed hat       1.3    976.3        13956       138.0       304.0
+   51  ride             0.3    976.3        13956       138.0       304.0
+toms vs kick: BIT-IDENTICAL to the kick
+```
+
+Crashes (49/57) are mapped to the *snare* family, so a crash is a 162 Hz tone with a 200 ms
+noise burst — centroid 219 Hz, identical to the snare sample-for-sample.
+
+This is also **doc drift**: `CHANGELOG.md` (wave 2) states "GM-style map (toms/bongos → kick
+family, crashes/clap/side stick → snare family …) VERIFIED: … 57 = crash (zero-crossing rate
+3.4 kHz)". The mapping is real; the implication that those notes sound like the instruments
+they are named after is not.
+
+**FIXED.** Every note resolves a `Spec` at note-on. Dominant pitch after:
+36 → 96.6 Hz, 41 → 85.4, 45 → 118.1, 48 → 164.4. The crash moved into the cymbal family:
+centroid 219 Hz → 10 477 Hz, −20 dB decay 209 ms → 1763 ms. The clap is four gated bursts,
+centroid 2745 Hz. Note 36 (the main kick), 38 and 42/44/46 keep their numbers.
+
+### M2 — The snare's "filtered noise burst" is low-passed. `Source/DSP/DrumEngine.h:242`
+
+```cpp
+v.hpMem = v.hpMem * 0.6f + white() * 0.4f;   // one-pole LOW-pass, ~3.6 kHz at 44.1 kHz
+```
+
+The comment at the top of the file promises "noise burst through a bandpass"; the code is a
+one-pole low-pass, so the snare has essentially no top end.
+
+Proof: `snare: body partial -13.6 dB, 4 kHz noise -42.2 dB, centroid 223 Hz`. A snare drum's
+spectral centroid sits in the 1–3 kHz region.
+
+**FIXED.** Two tuned shell modes (185 and 330 Hz) plus noise band-passed between a 300 Hz
+high-pass and a 9 kHz low-pass. After: centroid 936 Hz.
+
+### M3 — Drum voices are cut off 40 dB down. `Source/DSP/DrumEngine.h:279`
+
+```cpp
+if (envExp(v.pos, tail) < 0.01f)   // -40 dB
+    v.active = false;
+```
+
+Proof: `kick: last non-zero sample is -42.3 dB below the peak (the step to silence)`. That is
+a step, not a fade — at a realistic bus level it is an audible tick at the end of every hit.
+
+**FIXED.** Each voice ramps linearly to exact zero over 4 ms starting where its tail is 60 dB
+down, or at 3.5 s, whichever comes first. After: `-191.2 dB`.
+
+### M4 — The saw oscillators are not band-limited. `Source/DSP/InstrumentBank.h:338`
+
+`sawWave` is `2*phase - 1`. Harmonics above Nyquist fold straight back down.
+
+Proof (`MixAgentCharacterTest`, note 96 = C7 = 2093 Hz; anything below 0.9 × f0 cannot be a
+harmonic of f0):
+
+```
+  Pluck        worst sub-fundamental partial   -27.0 dBc at  140 Hz
+  Lead         worst sub-fundamental partial   -26.8 dBc at  246 Hz
+  Pad          worst sub-fundamental partial   -14.4 dBc at  246 Hz
+  Rage         worst sub-fundamental partial    -9.1 dBc at  331 Hz
+```
+
+Rage at -9 dBc is fold-down loud enough to be part of the sound. This affects 11 of the 16
+programs (every `r.saw` recipe) and is worst exactly where a lead is played.
+
+**FIXED.** PolyBLEP (Välimäki/Huovilainen), two comparisons per oscillator per sample. After:
+`Pluck -79.7, Lead -97.3, Pad -75.8, Rage -92.9 dBc` — between 50 and 84 dB less fold-down.
+
+### M5 — Tube mode is 1.6 dB below unity and 3rd-harmonic dominant. `Source/DSP/Saturation.h:292`
+
+```cpp
+const float t = std::tanh(x);
+return (t + 0.2f * t * t) / 1.2f;   // /1.2 normalises the PEAK, not the small-signal gain
+```
+
+Small-signal gain is `1/1.2` = -1.58 dB, so the default saturation mode is not unity at zero
+drive and switching modes changes the level.
+
+```
+unity gain at minimum drive (1 kHz @ -20 dBFS, mix 1, out 0 dB):
+      Tube   -1.61 dB
+      Tape   -0.04 dB
+      Soft   -0.02 dB
+   Exciter   -0.00 dB
+```
+
+Separately, the mode is named after a single-ended triode stage, whose signature is an
+*asymmetric* transfer curve and therefore a dominant 2nd harmonic. Measured, the 2nd falls
+away as drive rises and the 3rd takes over:
+
+```
+  mode      drive      H2       H3       H4       H5
+    Tube    0.25    -23.1    -23.5    -40.1    -45.1
+    Tube    0.50    -22.8    -15.5    -30.8    -28.3
+    Tube    1.00    -32.1    -10.0    -32.8    -15.3
+```
+
+(The 2nd-harmonic term is `0.2·tanh(x)²`, which saturates while `tanh(x)` keeps squaring up
+into odd harmonics.) Tape/Soft being 3rd-dominant is correct — those are symmetric curves.
+
+**FIXED.** `tanh(k·x + b) − tanh(b)` with `k = 1/(1 − tanh²b)` and `b = 0.30 + 0.40·drive`.
+Unity at zero drive: −1.61 dB → −0.02 dB. Harmonics after (H2 / H3, dBc):
+drive 0.15 @ −6 dBFS `−18.8 / −28.3`; 0.25 @ −6 `−16.8 / −24.1`; 0.50 @ −18 `−17.9 / −37.2`.
+At 0.50 @ −6 (`−15.8 / −15.1`) and 1.00 @ −6 (`−25.1 / −9.8`) the stage is in hard clipping
+and the odd harmonics catch up, which is what an overdriven triode does; those two points are
+measured and printed but not asserted. Settled peak at drive 1.0 on a −3 dBFS 200 Hz sine:
+1.090. Behaviour change: Tube is 1.6 dB louder at low drive.
+
+### M6 — Host presets are additive; "Init" resets nothing. `Source/PluginProcessor.cpp:614+`
+
+`setCurrentProgram` writes only the parameters each preset mentions, and `case 0: break;`
+means the "Init" preset is a no-op.
+
+Proof (`MixAgentAuditTest`, every ordered pair of the 12 presets, compared against loading
+the same preset into a fresh processor):
+
+```
+  preset pairs that do not land on the same settings as a fresh load: 118 of 132
+  worst: Vocal Presence -> Init leaves 23 parameters at the previous preset's value
+```
+
+**FIXED.** `setCurrentProgram` restores every parameter to its default before applying the
+preset. After: `0 of 132`. State loading is untouched, so opening a session still restores the
+saved parameters rather than the preset.
+
+### M7 — Notes 35–49 are stolen from the instrument on every MIDI channel. `Source/PluginProcessor.cpp:282`
+
+> **STILL OPEN after wave 4, with better evidence.** No plugin state stores a note number; what
+> does is the host's MIDI clips, which the plugin cannot migrate. See "Wave 4".
+
+```cpp
+auto isDrumNote = [drumChannel](int n) { return drumChannel || (n >= 35 && n <= 49); };
+```
+
+A bass line written on channel 1 between B0 and C#2 plays drums. Channel 10 already gives the
+whole GM map; the unconditional 35–49 window is a compatibility shim from an earlier build
+that costs the instrument its bottom 15 semitones.
+
+**LEFT OPEN, deliberately.** Narrowing the window would silently turn drum parts in saved
+sessions into synth parts. Documented in `README.md` under "Known issues and debt".
+
+### M8 — 63 MB and six process documents in the repo belong to other projects.
+
+See "Repo hygiene" below. `HANDOVER.md:23` also tells the owner to expect
+"ALL TESTS PASSED (30 checks)"; the suite has 151.
+
+**FIXED.** 134 files / 66,836,259 bytes removed from HEAD (recoverable from history — the
+commands are in `README.md`). The six process documents collapsed into one `README.md`, which
+the repo did not have at all, plus `CHANGELOG.md` and this file.
+
+---
+
+## MINOR
+
+### N1 — The reverb's diffusion allpasses are not allpasses. `Source/DSP/Reverb.h:242`
+
+> **SUPERSEDED — this finding is wrong.** The sections *are* unity-gain allpasses; measured
+> ripple 0.000 dB. The algebra below reads the two coefficients against each other and misses
+> that the delayed value is read before the write. See "Wave 4" for the measurement. The text
+> is kept as written so the correction can be checked against it.
+
+```cpp
+dl.buf[idx] = in + 0.5f * out;
+return 0.75f * out - 0.5f * in;
+```
+
+A unity-gain Schroeder allpass needs the same coefficient in both the feed-forward and the
+feedback path (`out = -g·in + d`, `buf = in + g·d`). With 0.75 against 0.5 the section has a
+magnitude that runs from -6.0 dB at DC to -1.6 dB at the delay's Nyquist, i.e. it colours the
+tank instead of only scrambling its phase.
+
+Measured effect on the late field (damping 0, decay 2 s, size 0.7, wet only):
+
+```
+   125Hz   3.22     250Hz  -0.89     500Hz  -0.95    1000Hz  -2.10
+  2000Hz  -2.48    4000Hz   0.15    8000Hz   3.05     worst deviation 3.22 dB
+```
+
+So the audible consequence is 3.2 dB of tilt, not the 4.4 dB ripple the coefficients alone
+suggest — the comb bank dominates. (The bank was eight lines at the time; it is sixteen now.)
+
+**LEFT OPEN, and the attempt is the reason.** Rebuilding the four sections as proper
+unity-gain Schroeder allpasses (`out = −g·x + d`, `buf = x + g·d`, `g = 0.5`) and re-trimming
+the wet input so the tail's level was unchanged made every number *worse*: late-field spread
+3.22 → 3.97 dB, L/R correlation of the tail 0.163 → 0.289. The tilt is the comb bank's sparse
+low-frequency modal density, not the diffusers; flattening it needs a different topology (an
+FDN), not a coefficient. The change was reverted and the measurement is recorded in
+`Tests/CharacterTest.cpp` next to the 4.5 dB guard.
+
+### N2 — Dead code. `Source/DSP/Saturation.h:154,185`
+
+`processChunk(..., bool shapingOff)` is only ever called with `false`, and the flag is
+re-tested on every oversampled sample (`for (int i = 0; i < osNum && !shapingOff; ++i)`).
+
+**FIXED.** Parameter and test removed.
+
+### N3 — Dead members. `Source/DSP/DrumEngine.h:139` (`Voice::note`), `Source/DSP/DrumEngine.h:150` and `Source/DSP/InstrumentBank.h` (`preparedBlock`, written in `prepare`, read nowhere).
+
+**FIXED.** `Voice::note` is now written and used to pick the drum's recipe; `preparedBlock` is
+gone from both classes.
+
+### N4 — Reverb pre-delay is applied *after* the tank. `Source/DSP/Reverb.h:285,308`
+
+> **FIXED in wave 4**, and the reason recorded below for leaving it open is wrong: the tank is
+> LTI, so the move is sonically null for static settings (null test −118.1 dBc). See "Wave 4".
+
+Pre-delay conventionally sets the gap between the dry sound and the first reflection. Here it
+delays the whole wet signal, tail included, which sounds the same for a steady input but
+moves the entire reverb rather than only its onset.
+
+**LEFT OPEN.** Moving the pre-delay in front of the tank changes what every existing reverb
+setting sounds like, for a difference that is inaudible on sustained material. Documented in
+`README.md`.
+
+### N5 — Reverb parameter smoothing follows the host block size. `Source/DSP/Reverb.h:52-54`
+
+`paramCoef`/`sizeCoef` are derived from `bs` (the block size promised in `prepare`) and
+`updateCoefficients()` runs once per `process()` call, so the smoothing time changes if the
+host delivers a different block size.
+
+### N6 — `-Wshadow`: 3 sites, 8 instances.
+
+`Source/PluginProcessor.cpp:184` — `prepareToPlay(double sr, int blockSize)` shadows
+`AudioProcessor::blockSize`; `Source/UI/Style.h:49` shadows `PowerToggle::text`;
+`Tests/SmokeTest.cpp:1031` shadows a local `inc`.
+
+**FIXED** at all three sites. `-Wall -Wextra -Wshadow -Wnon-virtual-dtor -Woverloaded-virtual
+-Wunused -Werror` on the project's own sources is clean, and CI enforces it.
+
+### N7 — The delay has an always-on, unlabelled 0.4 Hz wobble. `Source/DSP/Delay.h:186`
+
+Depth is `min(time × 0.0015, 1.5) ms` and there is no control for it. Measured pitch swing on
+a 1 kHz tone:
+
+```
+  always-on wobble at   100 ms: 1 kHz swings 999.6 .. 1000.5 Hz =  1.55 cents peak-to-peak
+  always-on wobble at   500 ms: 1 kHz swings 998.1 .. 1002.0 Hz =  6.76 cents peak-to-peak
+  always-on wobble at  2000 ms: 1 kHz swings 996.1 .. 1003.9 Hz = 13.47 cents peak-to-peak
+```
+
+This is a tape/BBD character choice and it is defensible; it is listed here because it is
+undocumented and not switchable, not because it is wrong. **Now documented** in `README.md`
+with these numbers, and asserted in `Tests/CharacterTest.cpp` so it cannot grow unnoticed.
+
+### N8 — Compressor attack is about twice the knob value. `Source/DSP/Compressor.h:80-88`
+
+> **FIXED in wave 4** by calibrating the knob against the detector rather than changing the
+> detector. See "Wave 4".
+
+The detector takes `max(peak, 1.414 × sqrt(RMS))` with an 8 ms RMS window, and that window
+slows the level rise:
+
+```
+  attack knob   1.0 ms -> 63 % of 10.5 dB GR reached at  2.83 ms
+  attack knob  10.0 ms -> 63 % of 10.5 dB GR reached at 20.33 ms
+  attack knob  50.0 ms -> 63 % of 10.5 dB GR reached at 94.83 ms
+```
+
+A hybrid detector is a legitimate design (it is what makes the compressor ignore crest
+factor — measured: a square and a sine at the same peak level are only 2.16 dB apart), but the
+Attack knob's units are then approximate rather than exact.
+
+### N9 — Width 0 is a mono sum only to within float rounding. `Source/DSP/StereoImager.h:71-72`
+
+`left = dryL + mix·(mid - dryL)` and `right = dryR + mix·(mid - dryR)` are algebraically both
+`mid` but round differently. Measured worst L−R difference: **-145.9 dBc**. Not audible; noted
+so nobody re-discovers it.
+
+### N10 — Three parameters have no control on the editor. `Source/PluginEditor.cpp`
+
+`in_gain`, `out_gain` and `drum_level` are ordinary automatable parameters with no knob, label
+or field anywhere on the UI — reachable only from the host's generic parameter list. The input
+and output *meters* are in the top bar; the trims that feed them are not.
+
+Proof (`EditorProbe`, new check):
+
+```
+  no control for in_gain
+  no control for out_gain
+```
+
+(`drum_level` was found by `grep -n "drum_level" Source/PluginEditor.cpp` returning nothing.)
+
+**FIXED.** IN and OUT sit beside their meters, DRUMS beside the instrument LEVEL knob.
+42 knobs → 45, and `EditorProbe` now asserts that every continuous parameter has one.
+
+### N11 — Ten knobs could only ever print "0" or "1". `Source/PluginEditor.cpp:100-137`
+
+Ten controls with a 0..1 range (`sat_drive`, `sat_mix`, `comp_mix`, `dly_feedback`, `dly_mix`,
+`dly_damp`, `dly_width`, `rvb_damp`, `rvb_width`, `rvb_mix`) were created with
+`addKnob(..., "", 0)`, i.e. no unit and zero decimal places, and `Knob::paint` drew
+`getTextFromValue(getValue())` — which is `String(value, 0)`. Half the range reads "0" and half
+reads "1". The eight frequency knobs printed a bare number with no unit, and `img_width`
+printed a bare 0..200 with no percent sign.
+
+**FIXED.** `Knob` takes a display scale and decimal count that affect the readout only: the
+0..1 controls read 0–100 %, frequencies say Hz, `img_width` and `rvb_size` say %.
+`EditorProbe` asserts every knob's readout differs at 25, 50 and 75 % of its range.
+
+### N12 — Opening the editor reset every parameter. `Source/PluginEditor.cpp:28`
+
+`juce::ComboBox::setSelectedId` notifies **asynchronously** by default, so the constructor's
+`presetCombo.setSelectedId(1)` fired `presetCombo.onChange → proc.setCurrentProgram(0)` a few
+milliseconds after the window opened. Harmless while preset 0 wrote nothing; a state-wipe once
+M6 made a preset restore every default. Caught by `EditorProbe` within the same wave.
+
+**FIXED.** All three of the editor's own initial `setSelectedId` calls pass
+`dontSendNotification`, and `EditorProbe` now constructs the editor, runs the message loop and
+asserts that not one parameter moved.
+
+### N13 — The reported tail length was a fixed 5 s. `Source/PluginProcessor.h:32`
+
+`getTailLengthSeconds()` returned `5.0` whatever the settings were. A host uses that to decide
+how long to keep calling `processBlock` after the transport stops, so under-reporting truncates
+the tail on bounce.
+
+Proof (`MixAgentAuditTest`, impulse in, time until the output falls 60 dB below the tail's own
+peak, floored at −120 dBFS):
+
+```
+  defaults                         measured   0.00 s, reported   5.00 s
+  reverb decay 10 s, mix 1         measured   4.68 s, reported   5.00 s
+  delay 2 s, feedback 0.95, mix 1  measured  68.00 s, reported   5.00 s
+```
+
+**FIXED.** The report is now computed from the settings: `1.25 × Decay + PreDelay + 0.3` for the
+reverb, `Time × ln(1000)/−ln(Feedback)` for the delay, floored at 6 s (which covers a released
+instrument chord with no FX engaged) and **capped at 30 s**. The cap is deliberate and
+documented: 2 s at 0.95 feedback is ~270 s of −60 dB decay in theory and 68 s measured with the
+damping filter in the loop, and no host will render minutes of silence — the delay does reach
+exact zero, its denormal guard sees to that. After: `6.00 / 12.81 / 30.00 s`.
+
+---
+
+## COSMETIC
+
+- **1002 `-Wold-style-cast` warnings** across the project's own sources (`Source/` and
+  `Tests/`). These are all `(float)x` / `(int)x` numeric casts and they are the codebase's
+  consistent style. Rewriting 1002 of them to `static_cast` is churn with no behavioural
+  benefit and a real chance of typos, so the flag is **not** adopted; `-Wall -Wextra
+  -Wshadow -Wnon-virtual-dtor -Woverloaded-virtual` are, and those are driven to zero.
+- `tools/build_probe.bat` / `tools/build_smoke.bat` pass `-DBUILD_TESTING=OFF`, which this
+  `CMakeLists.txt` never reads (`enable_testing()` is unconditional). Harmless; the target
+  names they build all still exist.
+
+---
+
+## Clean results (measured, no action needed)
+
+- **No allocation on the audio thread.** 0 allocations inside `processBlock` across
+  4 sample rates × 6 block sizes, while every parameter is swept and MIDI is delivered,
+  including oversized (4×) and mono buffers.
+- **Biquad/EQ is exact.** Worst |measured − analytic| across 6 filter types × 7 probe
+  frequencies: **0.000 dB**. High-shelf cramping at 44.1 kHz with a 16 kHz corner: the +12 dB
+  shelf reaches 11.67 dB. Band-frequency automation is coefficient-smoothed (worst step
+  0.0200, identical to the signal's own slope).
+- **Limiter.** Measured lookahead delay == `getLatencySamples()` (144 at 48 kHz). 8×-measured
+  true peak, with an *independent* interpolator, on an inter-sample-peak programme:
+  -1.05 dBTP for a -1.0 dB ceiling, -3.05 for -3.0, -0.35 for -0.3 — always under, never over.
+  50 Hz at 0 dBFS: 0.000 dB of cycle-to-cycle pumping.
+- **Saturation oversampling works.** 15 kHz at 44.1 kHz, drive 1.0: H2's fold-down at
+  14.1 kHz is -139 to -177 dBc, H3's at 900 Hz -113 dBc.
+- **Delay feedback is stable at the knob maximum** (0.95): decays 20.8 dB over 4.5 s with
+  damping off, 46.1 dB with damping at 1.0. Read-head distortion, measured where the LFO is
+  momentarily stationary: -51.9 dBc.
+- **State.** 1000 round-trips are byte-stable with every parameter unchanged; garbage, empty,
+  truncated, foreign and future-version states are all survived; an out-of-range
+  `hostProgram` is clamped.
+- **Instrument tuning is exact** — 0.0 cents at notes 36/48/60/69/81.
+- **Voice stealing is clean**: 200 overlapping note-ons into a 24-voice pool stay finite,
+  cap at 24 voices, worst step 0.13 against a peak of 0.54.
+- **Reverb stereo decorrelation**: L/R correlation of the tail from a mono source is 0.163.
+- **No locks, no logging, no file I/O, no exceptions on the audio path** —
+  `grep -rnE "CriticalSection|ScopedLock|std::mutex|MessageManagerLock|DBG\(|Logger|std::cout|printf|File " Source/`
+  returns only editor-construction `new`s and `std::atomic::load` calls.
+
+---
+
+## Repo hygiene
+
+Sizes from `du`. "Referenced by" is the result of
+`grep -rn <name> --include=*.h --include=*.cpp --include=CMakeLists.txt --include=*.yml .`
+
+| Path | Size | Referenced by |
+|---|---|---|
+| `Assets/Sounds/source_zips/garebear-808-kit.zip` | 48 MB | only `tools/build_assets.ps1` |
+| `Assets/Sounds/source_zips/garebear-drum-kit.zip` | 8.2 MB | only `tools/build_assets.ps1` |
+| `Assets/Sounds/source_zips/bpm150-trap-loop.wav` | 3.7 MB | only `tools/build_assets.ps1` |
+| `screenshots/` (37 PNGs + `gallery.html`) | 3.3 MB | `AGENTS.md` only |
+| `.opencode/` (21 agents, 22 skills, 8 references) | ~600 KB | nothing |
+| `.claude/skills/unity-cli/` | ~100 KB | nothing |
+| `Tests/block-blast-test.js` | 2 KB | nothing |
+| `tools/harness.js`, `balance.js`, `shot.js`, `dbg.js`, `patch-dbg.js` | 56 KB | `AGENTS.md` only |
+| `AGENTS.md` | 5.6 KB | browser-game tooling (`node tools/harness.js games/foo.html`) |
+| `IMPROVEMENT_LOG.md` | 26 KB | a log of `block-blast.html` changes |
+| `SWARM_BRIEF.md` | 4.5 KB | "Phone-first HTML5 arcade hub" |
+| `WORKLOG.md` | 4.0 KB | "Chess Juice build session" |
+| `tasks/plan.md`, `tasks/todo.md` | 16 KB | a Discord-clone web app named "Unity" |
+| `README.md` | — | **does not exist**; the repo has no front door |
+
+No C++ source, no `CMakeLists.txt` rule and no CI step loads anything from `Assets/`:
+`InstrumentBank.h` and `DrumEngine.h` synthesise every voice, and there is no
+`juce_add_binary_data`, no `AudioFormatManager` and no `createReaderFor` anywhere.
+`tools/build_assets.ps1` extracts the zips into `Assets/Sounds/_staging`, builds a `$manifest`
+in which every entry's `id` and `file` are the empty string, and then writes only file counts
+to the console — nothing consumes its output and no manifest file is produced.
+
+`build/`, `build-ci/` and `build-asan/` are all matched by `.gitignore` and `git status`
+is clean.
+
+The Windows workflow scripts (`tools/build_plugin.bat`, `build_probe.bat`, `build_smoke.bat`)
+still name targets that exist (`MixAgent_VST3`, `MixAgent_Standalone`, `EditorProbe`,
+`MixAgentSmokeTest`) and are kept.
+
+---
+
+## Unproven — suspected, not measured
+
+- **No lock is taken on the audio thread.** The grep above finds no `CriticalSection`,
+  `ScopedLock`, `std::mutex` or `MessageManagerLock` in `Source/`. I could not interpose a
+  lock detector the way I interposed `operator new`, so this is a grep, not a measurement.
+- `setFavorite` / `getFavorites` (`Source/PluginProcessor.cpp:540-600`) mutate `apvts.state`
+  from the message thread while the audio thread reads APVTS atomics. The audio thread never
+  touches the `ValueTree`, so this is probably fine, but it has not been run under
+  ThreadSanitizer.
+- The editor has never been *looked at*. `EditorProbe` drives the program ComboBox, every knob
+  and every toggle under `xvfb`, which proves the wiring, not the appearance or the layout.
+- No DAW, no `pluginval`, no real audio device was available. Host-side behaviour (latency
+  compensation, bypass handling, parameter automation from a real host) is inferred from the
+  JUCE contract, not observed.
+- `maxPreDelaySamples()` (`Source/DSP/Reverb.h:172`) reads `predelays[0].maxLen`, which is 0
+  until `prepare()` runs; `setPreDelayMs` before `prepare` would therefore clamp to -2.
+  Suspected benign because `prepare` recomputes `preDelayF` afterwards.
+
+---
+
+## Wave 4 — closing the items left open
+
+Four items were re-opened. Each began by reproducing the earlier number before anything was
+changed; two of those re-measurements turned up something the first pass had got wrong.
+
+### N4 (was LEFT OPEN) — reverb pre-delay after the tank. **NOW FIXED.**
+
+Reproduced: yes. Pre-delay was applied to the tank's output (`Reverb.h:278,312-313`).
+
+The reason recorded for leaving it open — "would change what every existing reverb setting
+sounds like" — is **wrong, and measurably so.** The tank is linear and time-invariant, so a
+delay commutes with it. Rendering the 4 s impulse response at pre-delay 40 ms (preset 4's
+value) before and after the move:
+
+```
+  response peak            : 0.0084374622
+  worst before/after diff  : 1.0491931e-08  = -118.11 dBc
+  bit-identical samples    : 159718 of 192000 (83.186 %)
+  RMS of the difference    : -112.96 dB below the response RMS
+```
+
+No preset's reverb sound moves. Onset and tail length are also unchanged, which is the same
+fact seen from the other side (48 kHz, decay 2 s, size 0.7, damp 0.5):
+
+```
+  pre-delay     onset before -> after            stereo RT60 before -> after
+      0 ms      848 sa / 17.67 ms -> 848 sa      1.479 -> 1.479 s
+     20 ms     1808 sa / 37.67 ms -> 1809 sa     1.479 -> 1.472 s
+     50 ms     3248 sa / 67.67 ms -> 3250 sa     1.479 -> 1.477 s
+    100 ms     5648 sa / 117.67 ms -> 5651 sa    1.479 -> 1.479 s
+```
+
+The onset lands at the pre-delay setting plus the tank's own 17.67 ms in both builds, to
+within the 1-2 samples the fractional read interpolates over.
+
+What the order **does** change is the knob under automation, and there the old arrangement was
+plainly wrong. Stepping pre-delay 0 -> 100 ms 1.07 s into a decaying tail, with the pre-delay
+behind the tank, slides a read pointer back over the wet history and re-plays the louder
+earlier part of the decay:
+
+```
+  worst tail-envelope change vs. the un-automated reference:  3.66 dB -> 0.00 dB
+  tail level rises above where it was when the knob moved  :  0.60 dB -> 0.00 dB
+```
+
+Asserted by three new checks in `Tests/CharacterTest.cpp`. The automation one fails against
+the pre-wave-4 code, so it is a guard and not a restatement.
+
+One theory tested and disproved: that a non-finite sample could survive in the pre-delay
+buffer for up to 250 ms after the comb bank had cleared itself. Feeding a single `Inf` with
+pre-delay at 200 ms produced **0 non-finite output samples of 102400** in both builds — the
+comb's own `clearTank()` runs before the wet signal reaches the pre-delay, so the buffer never
+sees it.
+
+### N1 (was LEFT OPEN) — "the reverb's diffusion allpasses are not allpasses". **WITHDRAWN: the finding was wrong.**
+
+The claim was that `out = 0.75*d - 0.5*x` against a feedback of `0.5` gives a magnitude running
+from -6.0 dB at DC to -1.6 dB at the delay's Nyquist. That reads the two coefficients against
+each other and misses that the delayed value is read *before* the write. Working it through,
+`d = z^-m (x + 0.5 d)`, so
+
+```
+  H(z) = 0.75 * z^-m/(1 - 0.5 z^-m) - 0.5  =  (z^-m - 0.5) / (1 - 0.5 z^-m)
+```
+
+which is the unity-gain Schroeder allpass with g = 0.5, exactly. Measured magnitude of one
+section at w = 0, pi/4, pi/2, 3pi/4, pi, at all four delay lengths:
+
+```
+  shipped  delay 225: -0.00 -0.00 -0.00 -0.00 -0.00 dB  ->  ripple 0.000 dB
+  shipped  delay 341: -0.00 -0.00 -0.00  0.00 -0.00 dB  ->  ripple 0.000 dB
+  shipped  delay 441: -0.00  0.00  0.00  0.00 -0.00 dB  ->  ripple 0.000 dB
+  shipped  delay 556: -0.00 -0.00 -0.00 -0.00 -0.00 dB  ->  ripple 0.000 dB
+```
+
+The replacement that was built and reverted (`y = -g*x + d`, `buf = x + g*d`) is the one that
+is not unity gain: `H(z) = (1.25 z^-m - 0.5)/(1 - 0.5 z^-m)`.
+
+```
+  wave3    delay 225:  3.52  2.33  1.61  1.39  1.34 dB  ->  ripple 2.183 dB
+  wave3    delay 556:  3.52  1.34  3.52  1.34  3.52 dB  ->  ripple 2.183 dB
+```
+
++3.52 dB at DC and 2.183 dB of ripple per section, four of them in series. That is why every
+number got worse, and reverting was right for a reason that had nothing to do with modal
+density. The sections were correct all along; the false claim is removed from the test comment.
+
+### N-tilt (was LEFT OPEN as part of N1) — the 3.2 dB spectral tilt. **NOW IMPROVED, with one number that did not improve.**
+
+Reproduced: yes, 3.22 dB exactly, and L/R correlation 0.163 exactly, once the probe used the
+same Hann-windowed estimator and the same two-channel buffer the suite uses. (A rectangular
+window reads 3.98 dB and a true-mono buffer 2.80 dB on the same build — the published figure is
+specifically the stereo path measured with a Hann window.)
+
+**First, a caveat that shapes everything below: 3.22 dB and 0.163 are single draws from wide
+distributions.** Over six noise seeds the unmodified build measures:
+
+```
+  2-ch spread: 3.22 5.68 5.76 4.23 2.55 4.21   mean 4.28 dB, worst 5.76 dB
+  |L/R corr| : 0.043 0.036 0.225 0.155 0.347 0.059   mean 0.144, worst 0.347
+```
+
+So the suite's 4.5 dB guard was only passing because of seed 5150; seeds 2 and 3 exceed it.
+Candidates were therefore judged on the six-seed mean, not on the audit's single seed.
+
+The cause named in the audit — the comb bank's low-frequency modal density — is correct. The
+bank was the Freeverb set, and it is badly conditioned:
+
+```
+  1116 = 2^2*3^2*31   1188 = 2^2*3^3*11   1277 = prime      1356 = 2^2*3*113
+  1422 = 2*3^2*79     1491 = 3*7*71       1557 = 3^2*173    1617 = 3*7^2*11
+  21 of the 28 pairs share a common factor; 7 of the 8 are divisible by 3
+  ratio max/min 1.449
+  stereo split: L = 4 lines over 1.215:1 (sum 4937) | R = 4 over 1.137:1 (sum 6087)
+```
+
+Six sets were built and measured, six seeds each, stereo path:
+
+```
+  8 lines, Freeverb (baseline)            mean 4.28  worst 5.76 dB
+  8 distinct primes, 1:1.49               mean 4.87  worst 6.27
+  8 distinct primes, 1:1.50, 43 % longer  mean 4.41  worst 6.07
+  8 distinct primes, 1:2.02               mean 5.05  worst 7.69
+  12 distinct primes, 1:1.50              mean 4.40  worst 4.92
+  12 distinct primes, 1:2.02              mean 3.79  worst 4.95
+  16 distinct primes, 1:1.51              mean 3.21  worst 4.19
+  16 distinct primes, 1:2.02   (shipped)  mean 2.35  worst 3.11
+```
+
+**Conditioning alone cannot do it.** No 8-line set beats 4.41 dB however well chosen, and the
+best-conditioned 8-line set (distinct primes over 1:1.49) is the *worst* of the lot at 4.87.
+Line count is the lever, which is what a modal-density diagnosis predicts. Three stereo splits
+of the winning 16 were compared and even log-spacing per side won by a wide margin (2.35 dB
+mean, against 3.99 for a paired interleave and 5.08 for a block split).
+
+Shipped: 16 mutually-prime lines over 1:1.95, eight per stereo half, interleaved so each
+channel spans the whole range.
+
+```
+                                        before -> after
+  spread, wave 3's seed                  3.22 -> 3.11 dB
+  spread, six-seed mean                  4.28 -> 2.35 dB
+  spread, six-seed worst                 5.76 -> 3.11 dB
+  per-octave-band RT60 deviation        0.577 -> 0.513 s  (3.16 -> 2.71 dB of decay rate)
+  modal ringing 40-500 Hz, tallest peak +21.13 -> +19.34 dB over the band mean
+  mono-sum path spread, six-seed mean    3.61 -> 4.21 dB   (range 2.84 -> 0.58 dB)
+  |L/R corr|, wave 3's seed             0.163 -> 0.171
+  |L/R corr|, six-seed mean             0.144 -> 0.152
+  reverb CPU, 48 kHz, blocks of 512     0.42-0.43 % -> 0.76-0.88 % of one core
+```
+
+**Two of these did not improve and are not being presented as if they had.** The L/R
+correlation is marginally worse on both the single seed and the mean, and misses the bar that
+had been set for it (0.163). Every one of the eight candidates landed between 0.109 and 0.176
+against a baseline whose own seed-to-seed range is 0.036-0.347, so this measurement cannot
+separate the sets and was not allowed to decide. The mono-sum path's mean is 0.6 dB worse,
+though its seed-to-seed range collapses from 2.84 dB to 0.58 dB, so the old figure was one
+lucky seed rather than a flatter response. The judgement call — ship it for a 1.9 dB mean
+improvement on the stereo path that holds on all six seeds, and report the two numbers that
+went the other way — is the owner's to reverse; the comb table is one edit.
+
+**This changes the voicing of the reverb.** Parameter IDs, ranges and defaults are untouched,
+so every session loads identically, but the tank itself is a different room. Wet level is held
+deliberately: the lines are mutually prime so they sum incoherently and the scale is
+1/sqrt(lines summed), referenced to the old bank. Measured wet RMS moves by at most 0.39 dB
+and typically 0.11 dB; without that normalisation it fell 3.1 dB everywhere.
+
+The suite's flatness guard tightens from 4.5 dB to 4.0 dB.
+
+**A test defect found on the way.** `SmokeTest`'s RT60 estimator took two 50 ms points 250 ms
+apart and divided. Over a 2 s or 5 s decay that measures the band's modal beating, not the
+decay rate. Against the **old** reverb, both ways:
+
+```
+  decay knob   2-point     least squares
+     0.5 s     0.498 s        0.501 s
+     2.0 s     2.272 s        1.904 s
+     5.0 s     7.889 s        4.330 s   <- 58 % high, and never tested
+```
+
+The check only looked at 0.5 s and 2.0 s, so it passed. It is now a least-squares fit over the
+40 dB below the start of the decay and asserts three settings instead of two, at the same 15 %.
+The new estimator passes against both banks (old 0.501 / 1.904 / 4.330 s, new 0.496 / 2.111 /
+4.729 s); the old estimator fails the new bank. This is a stricter assertion, not a loosened
+one — the tolerance is unchanged and the coverage grew.
+
+### N8 (was LEFT OPEN) — compressor attack about twice the knob. **NOW CALIBRATED.**
+
+Reproduced: yes, 2.83 / 20.33 / 94.83 ms for knob 1 / 10 / 50, and the crest-factor figure
+2.16 dB, both exact.
+
+The reason for leaving it open was sound: the detector's 8 ms RMS branch is what makes the gain
+reduction track peak level instead of crest factor, so removing it would change the compressor's
+character. The branch stays. The knob is calibrated against it instead.
+
+Sweeping the internal time constant at a fixed reference condition (48 kHz, 1 kHz tone,
+threshold -20 dB, ratio 4, a -40 -> -6 dBFS step = 10.5 dB of final gain reduction) gives a
+clean linear relation, `measured t63 = 1.888 * internal + 1.158 ms` over 2..100 ms with
+residuals inside 0.9 ms. `internalAttackMs()` inverts it. Printed vs measured:
+
+```
+  knob      before -> after        knob       before -> after
+   0.1 ms     2.00 ->  2.00         15 ms         -   -> 15.33
+   1.0 ms     2.83 ->  2.00         25 ms         -   -> 25.33
+   3.0 ms       -   ->  2.83        50 ms       94.83 -> 49.83
+   5.0 ms       -   ->  4.83        75 ms         -   -> 74.83
+  10.0 ms    20.33 -> 10.33        100 ms         -   -> 99.33
+```
+
+From 3 ms up the printed value holds within 6 %, and within 3.3 % from 10 ms. Asserted at seven
+settings.
+
+**Below about 2 ms the knob still cannot be honoured**, and no mapping can fix that: the RMS
+window puts a floor of roughly 2 ms on how fast the detector can rise. That was already true
+(a 1 ms knob measured 2.83 ms before) and is now stated in the code and asserted.
+
+The calibration is a reference-condition one, not an identity. The measured figure also depends
+on how deep the gain reduction is (14.83 ms at 18 dB of GR against 29.33 ms at 4.5 dB, same
+setting) and on the signal's frequency (13.83 ms at 100 Hz against 20.50 ms at 5 kHz). Both are
+inherent to a log-domain one-pole detector. Sample rate and the Release setting do not affect
+it: 20.29-20.33 ms across 44.1 / 48 / 96 / 192 kHz, and identical across release 10-1000 ms.
+
+Crest-independence is intact: square vs sine gain reduction 2.16 dB -> 2.13 dB.
+
+**BEHAVIOUR CHANGE for saved sessions.** The parameter ID, range and default are untouched, so
+every session loads with the same number on the knob — but that number now buys about half the
+attack time it used to. Factory presets 1, 2, 3 and 4 set 15 / 5 / 25 / 20 ms and will all
+attack roughly 1.9x faster. The alternative was to keep the timing and relabel the knob; a
+control printed in milliseconds should mean milliseconds, so it was calibrated. To restore the
+old timing, make `internalAttackMs()` return its argument unchanged.
+
+### M7 (LEFT OPEN) — notes 35-49 stolen from the instrument on every channel. **STILL LEFT OPEN. The decision holds; the reason recorded for it did not.**
+
+The recorded reason was "would change saved sessions". That is true of the *music*, but it is
+not true of anything this plugin saves, and the difference matters because it removes the usual
+escape hatch. Measured:
+
+```
+1. SAVED STATE
+   state size 2337 bytes, 58 parameters in the tree
+   every attribute name in the saved XML (6 distinct):
+     version encoding hostProgram id value p
+   attribute names containing "note", "key", "pitch" or "pad": NONE
+
+2. ROUTING OF ONE NOTE (38 = D1, inside the 35-49 window)
+                                     drums -40dB   inst -40dB  -> carried by
+   note 38 ch 1  (in the window)       -55.38 dB    -29.38 dB  -> DRUM ENGINE
+   note 38 ch 10 (GM drum chan)        -55.38 dB    -29.38 dB  -> DRUM ENGINE
+   note 52 ch 1  (above window)        -21.78 dB    -55.74 dB  -> INSTRUMENT
+   note 34 ch 1  (below window)        -20.73 dB    -54.52 dB  -> INSTRUMENT
+```
+
+Not one of the 58 parameters is a note number, and the only non-parameter state is a host
+program index plus a favourites list of program indices. So there is no plugin state to
+migrate, and a version hint would buy nothing.
+
+The note numbers live in the **host's MIDI clips**, which the plugin cannot read, version,
+migrate or even detect. A bass part written on channel 1 between B0 and C#2 plays drums today;
+narrow the window and the same clip plays the synth, silently, with no way for the plugin to
+warn anyone. That is a stronger argument for leaving it alone than the one first given, not a
+weaker one. **Not changed.** It stays documented in `README.md` under "Known issues and debt".
+
+### Wave-4 verification
+
+```
+ctest --test-dir build --output-on-failure        4/4 passed, 71.31 s
+  MixAgentSmokeTest      151/151        MixAgentCharacterTest   46/46  (was 42/42)
+  MixAgentAuditTest       11/11         EditorProbe             12/12
+total allocations inside processBlock across 24 rate/block combinations: 0
+latency (sat off): reported 193 measured 193 | (sat on): reported 193 measured 193
+  plus limiter engaged, and at 96 kHz - reported == measured at every setting
+```
+
+216 -> 220 checks. No assertion was loosened: the flatness guard tightened from 4.5 to 4.0 dB,
+the RT60 check gained a third setting at the same 15 % tolerance, and four checks were added.
+
+---
+
+## Wave 5 — testing the tests, a defect pluginval found, and a third attempt at the reverb
+
+Four passes of "all green" rest on the assumption that these assertions would go red if the
+code broke. This pass checked that assumption one defect at a time, and it also had the first
+external validator run against the plugin.
+
+### C5 (NEW, CRITICAL) — `setStateInformation` does not restore the parameters. `Source/PluginProcessor.cpp:568`
+
+pluginval 1.0.4 at strictness 10, on the wave-4 head:
+
+```
+!!! Test 6 failed:  LP On    not restored on setStateInformation -- expected 0, actual 0.335409
+!!! Test 26 failed: Comp On  not restored on setStateInformation -- expected 1, actual 0.594589
+!!! Test 37 failed: Img Mono not restored on setStateInformation -- expected 0, actual 0.386431
+!!! Test 38 failed: Dly On   not restored on setStateInformation -- expected 0, actual 0.125261
+!!! Test 51 failed: Lim On   not restored on setStateInformation -- expected 1, actual 0.544729
+!!! Test 56 failed: Inst On  not restored on setStateInformation -- expected 1, actual 0.822784
+FAILED!!  6 tests failed, out of a total of 59
+```
+
+Which parameters fail depends on the random values pluginval draws, so a second run named a
+different subset (`Img On` 0.401123 and `Rvb On` 0.366734). Reproduced headlessly, it is not
+six parameters. It is **57 of 58**:
+
+```
+  all 58 parameters randomised with setValue() and restored: 57 not restored
+```
+
+**Mechanism.** `AudioProcessorValueTreeState` keeps its own copy of each value
+(`ParameterAdapter::unnormalisedValue`) and its `setDenormalisedValue` writes the parameter
+*only* when that copy disagrees with the tree. The copy is kept in step by
+`parameterValueChanged`, which fires from `setValueNotifyingHost` — and **not** from a bare
+`AudioProcessorParameter::setValue`. A host that writes a parameter that way notifies nobody,
+so the copy stays where it was; at the next `setStateInformation` the copy and the stored tree
+agree, APVTS writes nothing at all, and the parameter is left holding the host's value.
+
+Why pluginval saw only the booleans while the headless run sees 57 of 58 is **INFERRED**, not
+measured: the JUCE VST3 wrapper's `setValueAndNotifyIfChanged` returns early when the new value
+equals the parameter's current one, and for a two-step (on/off) parameter that is most of the
+time, so the plugin never moves, never notifies, and the host's cached 0.40 for a boolean is
+never corrected — while a float parameter does move, does notify, and keeps APVTS's copy in step.
+That reading of `juce_audio_plugin_client_VST3.cpp:829` fits both observations, but it was not
+instrumented; what is measured is the headless figure and pluginval's before and after.
+
+**FIXED.** `setStateInformation` writes every parameter from the tree after `replaceState`.
+By then APVTS has given every parameter a child filled with the value it kept, so the tree is
+the authority and an older state's missing parameters still stay where they were. The
+notification also corrects the host's own copy.
+
+```
+[PASS] state restoration: a parameter written with the bare setValue() path is restored exactly
+[PASS] state restoration: all parameters randomised with setValue() come back on setStateInformation
+pluginval --strictness-level 10   FAILURE (6 of 59)  ->  SUCCESS
+pluginval --strictness-level 5    SUCCESS            ->  SUCCESS
+```
+
+**Why four passes of green missed it.** Both existing round-trip assertions write through
+`setValueNotifyingHost`, which keeps the APVTS copy in step, so the stale-copy case never
+arose. `SmokeTest`'s also restores into a *fresh* processor, whose copy starts at the defaults;
+`AuditTest`'s 1000x round-trip restores into the same processor but restores the state it just
+saved, so there was nothing to disagree with. Neither ever used the path a host uses. The new
+assertions do exactly what pluginval does — one parameter at a time, then all 58 at once,
+written with `setValue()` — at a 1e-4 tolerance rather than pluginval's 0.1.
+
+**A second defect in our own probe, found on the way.** `Harness::setRaw/getRaw` converted
+through `NormalisableRange`, which does not snap to the parameter's legal values, instead of
+through `RangedAudioParameter`, which does. So the torture probe was writing 0.44 into an
+on/off parameter — a value the plugin's saved state cannot represent, because APVTS stores the
+snapped one — and then asserting that it survived a round trip. It did, only because nothing
+restored it. Both now go through the parameter.
+
+### C6 (NEW, CRITICAL) — the delay read head could read one sample past its line. `Source/DSP/Delay.h:203`
+
+Found by AddressSanitizer, on the denormal-cost suite this pass added:
+
+```
+==30997==ERROR: AddressSanitizer: heap-buffer-overflow ... READ of size 4
+    #0 agm::Delay::readCubic(...) Source/DSP/Delay.h:221
+    #2 agm::Delay::process(juce::AudioBuffer<float>&) Source/DSP/Delay.h:135
+    #3 MixAgentAudioProcessor::processBlock(...) Source/PluginProcessor.cpp:446
+0x7f35920d4fa0 is located 0 bytes after 432032-byte region
+```
+
+`readPos` is `writeIndex - dist`, wrapped by adding the line length when it goes negative. A
+distance a hair larger than `writeIndex` leaves a value like `-1e-7`, and `-1e-7 + sizeF` rounds
+to `sizeF` itself in float — one index past the end of the line. The wraps for `i0-1`, `i0+1` and
+`i0+2` were all present; the wrap for `i0` itself was not.
+
+**This is the same defect, in the same shape, that wave 3 found with AddressSanitizer in the
+reverb's pre-delay** (see N-predelay, "delayF is a smoothed value and can sit at e.g. 1e-7") and
+fixed there — in a second read head that nobody went back to check. A one-past-the-end read on the
+audio thread, in shipping code, for three passes.
+
+**FIXED.** The integer index is wrapped after the float and the fraction is clamped, exactly as
+the pre-delay does it. It needed a particular combination to land on the boundary — feedback 0.9,
+mix 0.5, every module engaged, 20 s of audio — which is why three previous sanitizer runs missed
+it; the denormal-cost suite added this pass happens to sit exactly there, so the ASan build now
+reaches it. After: all three targets clean under `-fsanitize=address,undefined` with leak
+detection on.
+
+### The mutation audit
+
+Method: a compile-time switch, `-DMIXAGENT_MUTATE=n`, one defect per value of `n`, listed in
+`Source/DSP/Mutate.h`. Every block compiles out at `n = 0` and only the project's own
+translation units carry the define, so switching it does not rebuild JUCE. Run the whole table
+in one line:
+
+```sh
+tools/mutation_audit.sh                 # all of them; exit 1 if any survived
+tools/mutation_audit.sh 5 9 20          # just these
+```
+
+It is wired into CI as a manual `workflow_dispatch` job, not on the push path (twenty builds).
+
+First run: **19 of 20 caught, 1 survivor**. After the survivor produced a new assertion (below):
+**20 of 20 caught, 0 survivors.** The counts are assertions that went red, across
+`MixAgentSmokeTest` / `MixAgentAuditTest` / `MixAgentCharacterTest`.
+
+| n | defect injected | what had to fail | result |
+|---|---|---|---|
+| 1 | compressor gain computer neutralised — the stage passes audio through | its whole suite, and the dead-knob sweep | **caught**, 13 — incl. `DEAD: comp_enabled, comp_thresh, comp_ratio, comp_attack, comp_release, comp_knee, comp_mix` |
+| 2 | make-up gain folded back into the clamped reduction (**the defect that shipped**) | make-up gain | **caught**, 1 |
+| 3 | attack calibration removed (knob taken as the internal time constant) | printed-vs-measured attack | **caught**, 1 |
+| 4 | compressor threshold/ratio smoothing removed | the click hunt | **caught**, 1 — `CLICKS: comp_thresh, comp_ratio` |
+| 5 | limiter true-peak interpolator skipped, sample peaks only | the dBTP bounds | **caught**, 5 |
+| 6 | `Limiter::getLatencySamples()` returns 0 | measured == reported, at every setting | **caught**, 9 |
+| 7 | imager side gain frozen at unity — the Width knob does nothing | the 0/25/50/100/200 % table | **caught**, 4 — incl. `DEAD: img_enabled, img_width` |
+| 8 | imager takes the percentage as a raw side gain (**the defect that shipped**) | the same table | **caught**, 2 |
+| 9 | pre-delay moved back behind the tank (**the defect that shipped**) | the three pre-delay assertions | **caught**, 1 — only the automation one; the other two could not have failed, see below |
+| 10 | reverb denormal and non-finite flush removed | exact silence, NaN recovery | **caught**, 1 — the silence one; the NaN one could not, see below |
+| 11 | low tom rendered from the kick's voice spec | toms are not copies of the kick | **caught**, 1 |
+| 12 | PolyBLEP disabled, naive sawtooth | instrument fold-down aliasing | **caught**, 1 |
+| 13 | saturation oversampling bypassed (0 stages) | saturation fold-down aliasing | **caught**, 2 |
+| 14 | preset apply no longer starts from the factory defaults (**the defect that shipped**) | the 132 ordered preset pairs | **caught**, 2 |
+| 15 | in/out gain smoothing coefficient computed per block (**the defect that shipped**) | the click hunt | **caught**, 1 — `CLICKS: out_gain` |
+| 16 | delay read head degraded to nearest neighbour | delay wobble and distortion | **caught**, 3 |
+| 17 | EQ coefficient smoothing removed | the EQ zipper bound | **caught**, 1 |
+| 18 | comb bank halved back to 8 lines | reverb flatness over six seeds | **caught**, 3 |
+| 19 | `juce::ScopedNoDenormals` removed from `processBlock` | nothing named it | **SURVIVED** the first run; caught now, see below |
+| 20 | one parameter left out of the state restore | state restoration | **caught**, 2 |
+
+Four of the twenty are defects this repository actually shipped (2, 8, 14, 15) and one more is the
+one wave 4 fixed (9), so the table is not hypothetical: it re-injects the real history and watches
+the suite catch it.
+
+**The survivor, and it was the most useful result of the pass.** Removing
+`juce::ScopedNoDenormals` left all 220 assertions green, because denormals cost time and change
+no result. Timing it needs a reference workload with no denormals in it, and a quiet one will
+not do: with the guard off, a tail held "normal" by a -120 dBFS offset slowed down by 2x as
+well, because the filter and oversampler states ring down into the denormal range regardless —
+the ratio between the two hid the entire effect. Against 20 s of loud noise:
+
+```
+  guard on     decaying tail 1043 ms   loud noise 1068 ms   ratio 0.98
+  guard off    decaying tail 2060 ms   loud noise 1095 ms   ratio 1.88
+```
+
+So the guard is worth about 2x on a decaying tail, which is the state every reverb and delay
+tail in a session passes through. `MixAgentAuditTest` asserts the ratio at 1.5 and the mutation
+is caught. Twenty mutations, no survivors.
+
+**An assertion that claimed more than it measured.** Moving the pre-delay back behind the tank
+(mutation 9) left two of the three wave-4 pre-delay assertions green: "the wet onset is the
+pre-delay setting plus the tank's own onset" and "the tail length does not change with the
+pre-delay". They could not have failed. A pre-delay and a tank in series are linear and
+time-invariant, so their order cannot change the impulse response, and both of those numbers
+come from an impulse response. They prove the pre-delay is *accurate*; only the automation
+assertion proves where it *sits*. They are named for what they measure now.
+
+Two smaller off-target notes, left as they are with the reason stated:
+
+- `SmokeTest`'s "4x true-peak on sine bursts within 0.05 dB of the ceiling" stayed green with
+  the limiter's interpolator skipped (mutation 5). Its sine bursts have little inter-sample
+  excess at 7333 Hz; `MixAgentCharacterTest`'s three dBTP bounds, which use an independent 8x
+  measurement on a programme built to have inter-sample peaks, all failed. The bound is real,
+  it is just weaker than its name suggests.
+- Removing the reverb's denormal and non-finite flush (mutation 10) tripped the exact-silence
+  assertion but not the NaN-recovery one, because `processMono`/`processStereo` sanitise the dry
+  input before the tank, so a NaN from the host never reaches the flush. The flush inside
+  `combProcess` guards internally generated non-finite values, which cannot occur while the
+  feedback is clamped at 0.999 — genuinely unobservable, and not worth an assertion.
+
+### Bounds that were one draw of a distribution
+
+| Guard | Was | Six draws | Now |
+|---|---|---|---|
+| reverb flatness, stereo path | one seed, 3.11 dB, bound 4.0 | 3.11 / 3.69 / 2.21 / 3.43 / 1.76 / 2.03 dB | mean < 3.0 **and** worst < 4.0 |
+| reverb L/R correlation | one seed, 0.171, bound 0.8 | 0.057 / 0.171 / 0.448 / 0.246 / 0.016 / 0.378 | worst < 0.8 **and** mean < 0.5 |
+| drum hat HF/LF | one realisation, 17.6 dB, bound -6 | 12.7 .. 17.8 dB | worst of six |
+| drum snare centroid | one realisation, 936 Hz, bound 600 | 960 .. 1160 Hz | worst of six |
+| drum crash/snare centroid | one realisation, bound 1.3 | 7.9 .. 11.0 | worst of six |
+| drum crash -20 dB decay | one realisation, bound 150 ms | 1697 .. 1810 ms | worst of six |
+| drum hat velocity span | one realisation, 6.9 dB, bound 6.0 | 7.2 .. 9.0 dB | worst of six |
+
+**The correlation figure was never a measurement of anything.** The shipped bank's own
+seed-to-seed range is 0.016 to 0.448. Wave 4 recorded a single 0.171 and judged it against a
+0.163 "bar" from the previous bank — a 0.008 difference inside a 0.43-wide distribution. That
+comparison could not have decided anything, in either direction, and is withdrawn as evidence.
+
+The drum bounds all hold with wide margins on all six realisations, so nothing there was
+passing on luck; they are asserted on the worst of six regardless. The limiter's probes are
+sine, square and impulse programmes with no stochastic component at all, and the plugin has no
+dither stage, so there was nothing else of this species to re-measure.
+
+### N-tilt (LEFT OPEN after wave 4) — a different topology. **THIRD ATTEMPT, ALSO UNSUCCESSFUL. The comb bank stays.**
+
+Wave 4 established that the 3.2 dB tilt is a property of the topology rather than its tuning:
+no 8-line comb set beat 4.41 dB at any conditioning, the best-conditioned one was the worst,
+and the diffusers were proved exact. So this pass built the other standard topology — a
+feedback delay network — and measured both against the same probes, the same six seeds and the
+same settings. `Tests/ReverbProbe.cpp` is that instrument, and it measures both tanks in one
+run whichever one is selected:
+
+```sh
+./build/ReverbProbe_artefacts/Release/ReverbProbe            # both
+cmake -S . -B build -DMIXAGENT_REVERB_FDN=ON                 # make the FDN the plugin's tank
+```
+
+The FDN: 16 mutually-prime lines over the comb bank's own 1:2 range, recirculated through a
+16-point Hadamard scaled by 1/sqrt(16) — exactly orthogonal, 64 adds per sample and no
+multiplies — one damping one-pole per line, two unity-gain Schroeder allpasses per channel in
+front, and four mutually orthogonal Walsh sign patterns for the input and output taps. Its wet
+level is calibrated to the comb bank's within 0.1 dB so the two can be compared without a level
+change.
+
+```
+                                        comb bank (ships)        FDN
+  band spread, stereo path, 6 seeds     2.71 (1.76..3.69) dB     5.05 (3.71..6.55) dB
+  band spread, mono path,   6 seeds     4.05 (3.16..5.48) dB     4.57 (3.31..5.35) dB
+  |L/R correlation|,        6 seeds     0.219 (0.016..0.448)     0.103 (0.026..0.181)
+  per-octave RT60, 125 Hz..8 kHz        2.18 .. 1.41 s           2.08 .. 1.40 s
+  RT60 spread across octaves            0.771 s = 3.79 dB        0.679 s = 3.43 dB
+  modal ringing 40-500 Hz               +30.90 dB over the mean  +29.47 dB
+  RT60 vs the Decay knob                monotonic, 0.54..10.43 s monotonic, 0.54..10.43 s
+  RT60 vs the Size knob                 invariant within 8.2 %   invariant within 9.5 %
+  tail reaches exactly 0.0              yes, after 21.9 s        yes, after 20.9 s
+  60 s of full-scale square, decay 10   all finite, peak -0.30   all finite, peak -1.15 dBFS
+  wet level, stereo / mono              -37.20 / -40.27 dBFS     -37.22 / -40.18 dBFS
+  CPU, 48 kHz, blocks of 512            0.29 %                   0.63 % of one core
+```
+
+Eight FDN configurations were measured, six-seed stereo band spread each time:
+
+```
+  Walsh taps, 1:2 span, no diffusion              4.77 dB mean (2.13..8.35)
+  Walsh taps, 1:2 span, input diffusion           5.05 dB mean (3.71..6.55)   <- kept
+  Walsh taps, 1:4 span, input diffusion           5.25 dB mean (3.38..7.03)
+  Walsh taps, 1:4 span, no diffusion              5.26 dB mean (2.32..6.45)
+  split halves in and out                         7.10 dB mean (5.42..9.04)
+  split halves in, even/odd out                   7.43 dB mean (5.91..9.68)
+  even/odd in, split halves out                   7.10 dB mean (5.42..9.04)
+  unbalanced sign masks (4 of 16 negative)        6.27 dB mean (5.00..7.72)
+```
+
+**One number could not be reproduced, and it is the CPU figure.** Wave 4 recorded the reverb
+stage at 0.76-0.88 % of a core at 48 kHz with blocks of 512. `ReverbProbe`, timing the tank alone
+over 20 s of audio and taking the best of three, reads 0.27-0.51 % for the same comb bank across
+runs on this machine - which had three other builds running on its four cores throughout, so the
+absolute figures move by 2x between runs and are not worth quoting to two digits. The **ratio**
+measured in one run is stable and is what the comparison rests on: the FDN costs **2.2x** the comb
+bank (0.29 % against 0.63 % in the run tabulated above, 0.61 % against 0.29 % and 0.80 % against
+0.51 % in two others). Wave 4's absolute figure is neither confirmed nor contradicted; a different
+instrument on a different machine.
+
+Two things worth recording from the losing attempts. The split-half mixings are much worse
+because only half the lines get direct input and their first echoes arrive in phase. And the
+Walsh taps sum to zero, which costs low frequencies: the Walsh functions are the Hadamard
+matrix's own eigenvectors, so the modes with every line in phase — the low ones — are cancelled
+exactly by a zero-sum tap, and the 125 Hz band measured 4.5 dB down on the six-seed mean.
+Unbalancing the signs fixes that band and colours the others worse.
+
+**Judgement.** The bar was: beat the comb bank on spread without regressing correlation or
+mono-sum, judged against distributions. The FDN loses on spread by 2.3 dB of mean and 2.9 dB of
+worst case, and its mono path is 0.5 dB worse too. It wins on correlation, on modal ringing and
+on per-octave RT60 spread, and costs 2.2x the CPU. None of that buys back the number the whole
+exercise is about, so **the comb bank stays**. The FDN stays behind `-DMIXAGENT_REVERB_FDN=ON`
+with these measurements; built that way, the suite fails exactly the two reverb flatness
+assertions and passes the other 225.
+
+Three attempts have now been made on this tilt — two comb-set rebuilds in wave 4 and a change
+of topology here — and the honest conclusion is that **2.7 dB of six-seed mean spread is as
+flat as this architecture gets**. A materially flatter reverb means a different design
+(nested allpasses in the Dattorro manner, or a much larger network), which is a new reverb
+rather than a fix to this one.
+
+### N8-floor (LEFT OPEN after wave 4) — "the attack cannot be honoured below 2 ms". **WITHDRAWN: that was the probe.**
+
+Wave 4 recorded a roughly 2 ms floor on the Attack knob and attributed it to the detector's
+8 ms RMS branch. Reproducing it showed where it came from: the probe read the output peak over
+a **2 ms** window and started 2 ms after the step, so 2.00 ms was the smallest number it could
+print for any setting and any RMS window. One cycle of the 1 kHz probe is enough:
+
+```
+  knob   0.1   0.5   1.0   2.0   3.0   5.0  10.0  25.0  50.0 100.0 ms
+  t63    1.00* 1.00* 1.00* 1.33  2.83  4.83 10.33 23.83 48.83 98.83 ms   (* probe resolution)
+```
+
+The knob is honoured below 2 ms already. The proposed change — a shorter RMS window — was
+measured anyway, with `-DMIXAGENT_COMP_RMS_MS=n`:
+
+```
+  window    t63 at a 3 ms knob    square vs sine (crest independence)
+  8 ms      2.83 ms               2.13 dB
+  4 ms      2.33 ms               2.02 dB
+  3 ms      2.33 ms               1.95 dB
+  2 ms      1.92 ms               1.81 dB
+```
+
+It buys 0.5-0.9 ms in the middle of the range, costs a refit of the knob calibration (which was
+fitted against the 8 ms branch), and moves the detector further from the RMS behaviour the
+branch exists for. With no floor to lift, that is not a trade worth making: **the window stays
+at 8 ms**, and both columns are recorded here rather than in a decision. The corrected probe
+also tightened the assertion — below 3 ms it asserted only "faster than 2.25 ms", which the old
+probe could not have failed, and it now asserts the measured attack is no slower than the knob.
+
+### Behaviour changes
+
+- **Loading a saved session now applies every parameter.** This is the C5 fix and it is a
+  behaviour change: a session saved by a build with the defect may hold, for an on/off
+  parameter, a raw value like 0.40 that the plugin was reading as "off". It now loads as
+  exactly off. The audible state is the same in every case — the snap always agrees with the
+  `>= 0.5` test the DSP used — but a host reading the parameter back will see 0 where it
+  previously saw 0.40.
+- **The reverb is unchanged.** The comb bank ships, so no preset's voicing moves. Had the FDN
+  shipped it would have. Three of the twelve factory presets engage the reverb — 2 "Vocal
+  Presence" (mix 0.15, decay 2.0 s), 4 "Wide & Spacey" (size 0.85, decay 4.0 s, mix 0.35,
+  pre-delay 40 ms) and 9 "Trap: Plugg Pad" (size 0.85, decay 5.0 s, mix 0.45, pre-delay 35 ms) —
+  and each would have been rendered by a different room at the same settings. The other nine
+  leave `rvb_enabled` at its default of off, so they are unaffected by either tank. The wet level
+  is matched within 0.1 dB either way, so switching between the two is a change of character and
+  not of balance.
+- Nothing else changed in the DSP. No parameter ID, range, default or version hint moved.
+
+### Wave-5 verification
+
+```
+ctest --test-dir build --output-on-failure        4/4 passed, 40.40 s
+  MixAgentSmokeTest      153/153  (was 151)    MixAgentCharacterTest   50/50  (was 46)
+  MixAgentAuditTest       12/12   (was 11)     EditorProbe             12/12
+total allocations inside processBlock across 24 rate/block combinations: 0
+latency (sat off): reported 193 measured 193 | (sat on): reported 193 measured 193
+  plus limiter engaged and at 96 kHz - reported == measured at every setting
+decaying tail 1099.3 ms vs loud noise 1087.1 ms, ratio 1.011 (denormal guard engaged)
+strict warnings, the exact CI step, on all seven of our own translation units:
+  -Wall -Wextra -Wshadow -Wnon-virtual-dtor -Woverloaded-virtual -Wunused -Werror   0 warnings
+tools/mutation_audit.sh                           20 of 20 caught, 0 survived
+pluginval --strictness-level 5  --validate ...    SUCCESS
+pluginval --strictness-level 10 --validate ...    SUCCESS   (was FAILURE, 6 of 59)
+ASAN_OPTIONS=detect_leaks=1, -fsanitize=address,undefined:
+  MixAgentSmokeTest 153/153, MixAgentAuditTest 12/12, MixAgentCharacterTest 50/50
+  all exit 0, no AddressSanitizer, LeakSanitizer or UndefinedBehaviorSanitizer report
+  (it found C6 below first; these are the numbers after that fix)
+```
+
+220 -> 227 checks. **No assertion was loosened.** Three were tightened: the reverb flatness guard
+now has to hold on a six-seed mean of 3.0 dB as well as a 4.0 dB worst case, the compressor's
+sub-3 ms attack bound went from a fixed 2.25 ms (which the old probe could not have failed) to the
+knob value, and the drum bounds are asserted on the worst of six noise realisations instead of
+one. Seven checks were added.
+
+pluginval 1.0.4 at revision `4c5adc2`, built without Steinberg's embedded VST3 validator, so its
+own "vst3 validator" group reports as skipped and the other 58 checks run:
+
+```sh
+xvfb-run -a .../pluginval --strictness-level 10 --timeout-ms 900000   --validate build/MixAgent_artefacts/Release/VST3/MixAgent.vst3
+```
+
+**CI.** GitHub Actions was unavailable for part of this pass: every job failed with zero steps in
+two to three seconds, with the check-run annotation "The job was not started because recent
+account payments have failed or your spending limit needs to be increased". That is an account
+billing state, not a workflow defect - `if`-gated jobs correctly skipped, which costs no runner,
+and the workflow parses. It was resolved by the owner during the pass, and the
+runs since are real: run 21 (`e54e504`), run 23 (`bd572ae`) and run 25 (`a73cd44`) each executed
+the full job and completed **success** in about eleven minutes.
+Nothing in this section depends on CI: every number above was produced locally by the command
+printed beside it.
+
+---
+
+
+## Wave 6a — the editor's appearance, measured
+
+This editor's own wave-5 pass closed with "the editor has still never been looked at", and the
+probe that drove it rendered a 1160x920 snapshot and then asserted `img.getWidth() == 1160 &&
+img.getHeight() == 920` — "setBounds worked", not "the editor is legible". Five passes of green
+therefore said nothing about what this editor looks like. This wave measures it: thirteen numeric
+rules, on the component tree and on the rendered pixels.
+
+The instrument is `Tests/VisualRubric.h`, run from `Tests/EditorProbe.cpp`.
+
+**Measured at three PARAMETER states, not three sizes.** This editor is a fixed 1160x920 and has
+no resize to sweep. What varies is the readout: 61 knobs print values into boxes 52 px wide, and
+`drawFitted()` condenses a string that does not fit rather than clipping it, down to a 0.55 floor
+at which it does clip. So the rubric runs with every parameter at its default, then at its
+minimum, then at its maximum. That is what found the two readouts below that print zero at the
+bottom of their range — visible in exactly one of the three states.
+
+### The rubric, measured
+
+| # | rule | threshold | defaults | all-min | all-max | asserted |
+|---|---|---|---|---|---|---|
+| R1 | readout precision | 0 | 0 | 0 | 0 | yes |
+| R2 | unitless fields / mixed time units | 0 | 0 | 0 | 0 | yes |
+| R3 | clipped text, worst overflow | 0 px | 0.0 | 0.0 | 0.0 | yes |
+| R4 | containment, worst px out | 0 px | 0 | 0 | 0 | yes |
+| R5 | overlapping sibling pairs | 0 | 0 | 0 | 0 | yes |
+| R7 | indicator contrast, worst | ≥ 3:1 | **4.50** | 4.50 | 4.50 | yes |
+| R8 | smallest interactive side | ≥ 24 px | **24** | 24 | 24 | yes |
+| R12 | largest empty rectangle | ≤ 15 % | 5.65 | 5.65 | 5.48 | yes |
+| R6d | **declared** text contrast, worst | ≥ 4.5:1 | **4.85** (0 under) | 4.85 | 4.85 | yes |
+| R6 | **rendered** text contrast, worst | ≥ 4.5:1 | **2.95** (44 under) | 2.95 | 2.95 | reported |
+| R9 | distinct font sizes | ≤ 5 | **9** | 9 | 9 | ratcheted |
+| R10 | distinct hues | ≤ 6 | **7** | 6 | 6 | ratcheted |
+| R11 | components off the 4 px grid | 0 | **76 of 76** | 76 | 76 | ratcheted |
+| R13 | meters without a scale | 0 | **4 of 4** | 4 | 4 | ratcheted |
+
+R11 also carries an off-grid **residual** — the sum over components of
+`x%4 + y%4 + w%4 + h%4`, currently **385** — because the count is saturated and cannot move.
+Under 32x32 but at or over 24x24: 16 controls.
+
+### The defects it found, all fixed
+
+| | rule | before | after |
+|---|---|---|---|
+| D1 | R2 | the REVERB panel carried **DECAY in seconds beside PRE-DELAY in milliseconds** — two time units in one panel | DECAY reads 200–10000 ms; the parameter is still seconds, the scale argument converts the readout only |
+| D2 | — | the limiter's ATTACK is 0.01–10 ms at one decimal and printed **"0.0 ms"** at the bottom of its range; the compressor's is 0.1–100 ms at zero decimals and printed **"0 ms"** | 2 and 1 decimals. Found only by measuring at the all-minimum state |
+| D3 | R8 | **thirteen** controls under the 24 px hit-target floor; the eight section power switches were **18x16** — the switch that turns a module on was the hardest thing on the editor to hit | 24x24 inside the 27 px header band; HP/LP 48x24, MONO 64x24, the two instrument combo boxes 24 px tall. 13 under 24x24 → **0** |
+| D4 | R7 | three painted indicators under 3:1, all carrying state or a scale: the **off** power LED at **1.80:1**, the **off** power ring at **1.22:1**, and the gain-reduction meter's tick rules at **1.08:1** — those three rules are that meter's only scale | 1.08:1 → **4.50:1** |
+| D5 | R6 | `kTextDim` measured **3.94:1** declared against the panel fill it is read on, and that one colour carries every knob caption, every section header, the IN/OUT labels, the MODE caption and the pad strip | same hue, lighter: 5.77:1 declared. **59 captions under 4.5:1 → 44, worst 2.35:1 → 2.95:1** |
+
+D2 is not one of the thirteen rules. It is the sibling of N11 from an earlier wave ("ten knobs
+could only print 0 or 1"), it is objectively wrong, and it was in front of the measurement, so it
+was fixed.
+
+### The four rules this editor does not meet, plus the rendered half of R6
+
+None is asserted as passing and none is dropped. Each is measured, printed with its real
+threshold beside it, and **ratcheted**: the assertion is "no worse than the value recorded
+today", so a later pass cannot give ground without the suite saying so. Every one needs a change
+to the visual language, which is 6b.
+
+- **R6 — 44 captions under 4.5:1 RENDERED, worst 2.95:1**, while every one of them clears the
+  floor on its DECLARED colour (R6d, worst 4.85:1, nothing below). The cause is the type size, not
+  the colour. At
+  8.5 px the brightest colour actually PRESENT in a glyph is an anti-aliased mid-tone, so no
+  dimmed colour reaches 4.5:1 rendered; only near-white does, and that erases the hierarchy
+  between a caption and its value. Needs a bigger type scale — which is also what R9 needs.
+- **R9 — nine font sizes: 8.5, 9.0, 9.5, 10.0, 10.5, 11.0, 15.0, 16.0, 24.0 px.** Six of them
+  inside 2.5 px of each other is noise rather than a scale, and choosing which to keep is a type
+  decision.
+- **R10 — seven hues** (six at the two extreme states): the orange accent, amber, cyan, pad blue
+  and three meter colours. A traffic-light meter legitimately needs three of those; getting to six
+  is a palette decision. The run prints each hue's modal colour and what share of its ink lands on
+  an interactive component, so 6b has the data rather than an angle.
+- **R11 — all 76 laid-out components off the 4 px grid, residual 385.** The layout is built from
+  `removeFromTop (44)`, `getRight() - 26`, `+ 7` and a seventh-of-the-width float; closing it means
+  re-deriving every coordinate in `resized()`, which is a relayout.
+- **R13 — four meters, none with a labelled tick or a reference mark.** The level meters are 14 px
+  wide and the gain-reduction meters 20; a dB scale does not fit in either. This one needs space
+  the layout does not currently have.
+
+**R7 is asserted on INDICATORS** — anything carrying state, a value or a scale — and the four
+STRUCTURAL pairs are measured and printed beside the assertion rather than hidden by it: panel
+border **1.22:1**, bevel highlight **2.30:1**, a knob's unfilled groove **1.27:1**, its tick ring
+**1.44:1**. R7's "control outlines" clause is therefore PARTLY open, and the run says so on every
+line it prints. Raising a deliberately dark design's borders and grooves to 3:1 is a change of
+visual language, not a defect fix.
+
+**R6 is split into the rule and the portable part of it.** R6 proper is measured on glyph pixels,
+which is what the rubric asks for and which is also partly a measurement of the font stack: the
+sibling repository measures the same editor at the same commit as 4.77:1 under JUCE 9.0.2 and
+5.29:1 under 8.0.9, because anti-aliased coverage of 8 px stems differs with the rasteriser. The
+local background, by contrast, is a flat fill and does not depend on rasterisation at all, so
+**R6d** pairs it with the colour the editor DECLARED. R6d is asserted at the rubric's real 4.5:1
+threshold and passes at 4.85:1 with nothing below; R6 is reported, with a deliberately loose
+bound at 2.0 that exists only to catch a gross rendering change. The thing a later pass can
+regress is the colour, and that is the thing now asserted at the threshold.
+
+R12 passes at 5.5–5.7 %, and the run prints a second figure at a looser tolerance (9.4–12.6 %)
+because the first counts a 1 px panel border as ink and therefore measures the largest empty
+rectangle INSIDE a panel rather than the largest empty region. Both are under the ceiling.
+
+### Three defects in the checker itself
+
+Found while measuring, before any mutation ran:
+
+- **R3 reported "MONO" as needing 41.8 px in 34** and called it clipped. `PowerToggle` overrides
+  `drawToggleButton` entirely, so the generic "JUCE leaves room for a tick box" geometry was
+  wrong; the toggle now reports its own text box, which is 44 px wide.
+- **R6 reported MODE at 1.00:1** — background on background. MODE is CENTRED in a 134 px box and
+  the painted-text items carried no justification, so the glyph search looked at the left of the
+  box and found no glyphs at all. `PaintedText` now carries its justification and `paint()` draws
+  with it.
+- **R9 counted eleven font sizes**, two of which (15.4 and 18.2 px) the editor had never chosen —
+  they were the checker's own arithmetic for a ComboBox's font. It now asks the LookAndFeel. Nine
+  sizes, all of them real.
+
+### Part B — fourteen visual mutations
+
+Ids 21–34 in `Source/DSP/Mutate.h`, run by `tools/mutation_audit.sh` (a visual id builds and runs
+`EditorProbe` under xvfb instead of the three DSP targets). **13 of 14 killed.** Table and
+measured values in the commit; the shape of the three that did not die first time:
+
+- **29 survived because the rubric had two sources of truth**, which is the exact failure mode it
+  exists to catch. R7 was measured on a table of declared colour pairs in the editor while
+  `Meter::paint` had its own literal, so the mutation changed the literal and R7 went on reporting
+  4.50:1 for a tick now drawing at 1.08:1. The same hole existed for every knob colour. Closed
+  structurally: `Knob`, `Meter` and `PowerToggle` each own their colours, their `paint()` draws
+  from those, and `graphicSamples()` asks the widgets instead of repeating them — nine of the
+  nineteen R7 pairs moved from a hand-copied list to the widget that paints them. The golden pixel
+  hashes are unchanged by that refactor, which is the evidence it changed no pixel.
+- **32 was too weak, twice.** Turning every preview key violet REPLACED the pad blue rather than
+  adding to it; the second attempt used `0xff7d2fff`, which is hue 262° and falls in the SAME 30°
+  bucket as the navy panels. `0xffcc2fff` is 285°, a bucket nothing else occupies.
+- **21 could not be caught by R11 as written, and that is a finding about the RULE.** All 76
+  components are already off the grid, so the count is saturated. The off-grid residual was added
+  for this reason. A ratchet pinned at a saturated maximum is not a guard; it is a note.
+- **33 survives on purpose and is kept.** It makes a meter CLAIM a labelled scale and a reference
+  mark it does not draw, and nothing goes red, because R13 is measured on what each meter reports
+  about itself (`Meter::scaleInfo`) and not on its pixels. It is declared as an expected survivor
+  in `Mutate.h` and in the runner so the exit status still means something. Dropping it would have
+  hidden the limitation.
+
+### Part C — golden screenshots
+
+A golden pixel hash per state, printed on every run; `Tests/golden-shots.txt` records the three
+hashes, the three PNG sha256s, the byte sizes and the environment. Taken on the pixels rather than
+on the PNG so it does not move with zlib's compression level, and printed rather than asserted
+because glyph rasterisation depends on the installed fonts, on fontconfig, on FreeType and on
+JUCE. `AGM_SHOT_DIR` additionally writes the PNG and a JSON component tree per state; off by
+default, free when off, and the measurement is never gated.
+
+### Wave-6a verification
+
+```sh
+ctest --test-dir build --output-on-failure
+AGM_SHOT_DIR=/tmp/mix-shots xvfb-run -a ./build/EditorProbe_artefacts/Release/EditorProbe
+MUT_BUILD=build-mut tools/mutation_audit.sh 21 22 23 24 25 26 27 28 29 30 31 32 33 34
+```
+
+| what | result |
+|---|---|
+| suite before wave 6a | 153 + 12 + 50 + 12 = **227 checks, 0 failed** |
+| suite after wave 6a | 153 + 12 + 50 + 58 = **273 checks, 0 failed** |
+| with `AGM_SHOT_DIR` set | **276 checks, 0 failed** (one extra per state: the PNG and the tree were written and are non-empty) |
+| `EditorProbe` alone | 12 → **58 checks** |
+| visual mutations 21–34 | **13 killed, 1 expected survivor (33), 0 unexpected**, after two were strengthened and one rubric hole was closed |
+| PNGs written | 123 591 / 101 131 / 113 882 bytes at defaults / all-minimum / all-maximum |
+| warnings on the project's own seven translation units, including the new `Tests/VisualRubric.h` | **0**, with `-Wall -Wextra -Wshadow -Wnon-virtual-dtor -Woverloaded-virtual -Wunused -Werror` — the same strict step CI runs, verified locally on all seven files |
+| CI, run 39 on `570d5da` (ubuntu-24.04, JUCE 8.0.9, Release) | **success**: `Build tests + VST3` success, `Tests (ctest)` success — all four targets including the 58-check editor probe — `Editor probe (xvfb)` success, `Strict warnings on our own sources` success. The `pluginval` and `mutation-audit` jobs skipped, which is the manual gating working. This is the external check the private repositories in this review cannot have, and it ran the rendered-pixel rules on a different machine with a different font stack than the one they were measured on |
+
+### Still open after wave 6a
+
+- **R9, R10, R11, R13** above: four rubric rules measured, ratcheted at today's value and not met.
+  Each needs a change to the visual language, and that is 6b.
+- **R6's RENDERED half is not met**: 44 captions under 4.5:1 on glyph pixels, worst 2.95:1, while
+  every one of them clears the floor on its declared colour (R6d, asserted, worst 4.85:1). The
+  cause is 8.5 px type, so this closes with R9 and not on its own. R6 carries a deliberately loose
+  bound (2.0) rather than a ratchet at 2.95, because a rendered number is partly a measurement of
+  the font stack and a ratchet on it would fail for a font someone installed; R6d is the ratchet
+  that matters, and it is at the rubric's real threshold.
+- **R7's control-outline clause** is partly open: four structural pairs between 1.22:1 and 2.30:1.
+- **R13 cannot detect a meter that lies about its own scale** (mutation 33), because it is measured
+  on the component's report rather than on pixels.
+- **Ten `textFromValueFunction` lambdas are dead.** `Knob::readout()` composes its own string from
+  the value, the scale and the suffix and never consults them, so `hzText`'s "20.0 kHz" never
+  appears — the knob paints "20000 Hz". Both carry a unit and neither clips, so no rule fires;
+  it is dead code that states an intention the editor does not honour. Not changed here, because
+  altering ten readouts' appearance is a 6b decision.
+- **`logoLabel` is an empty `juce::Label`** occupying the same 220x36 rectangle as the painted
+  "MIXAGENT" wordmark. It paints nothing. Reported rather than removed.
+- **Nothing has been seen by a human eye on a real screen**, and no DAW has opened this editor.
+  Thirteen numeric rules are not taste.
+
+## Summary
+
+| # | Severity | Finding | Status |
+|---|---|---|---|
+| C6 | CRITICAL | Delay read head read one sample past its line (audio thread) | FIXED (wave 5) — found by AddressSanitizer on the new denormal suite |
+| C5 | CRITICAL | `setStateInformation` restored 1 of 58 parameters when the host had written them without notifying | FIXED (wave 5) — found by pluginval, strictness 10 FAILURE -> SUCCESS |
+| C1 | CRITICAL | Compressor make-up gain unreachable | FIXED — 0.00 → 3.00/6.00/12.00/24.00 dB |
+| C2 | CRITICAL | Img Width saturates at 2 %; 100 % means 200 % | FIXED — side gain now tracks the percentage |
+| C3 | CRITICAL | In/Out gain smoothing ~blockSize times too fast | FIXED — per-sample coefficient |
+| C4 | CRITICAL | Compressor threshold/ratio unsmoothed | FIXED — step 0.41/0.34 → 0.0155 |
+| M1 | MAJOR | 10 drum notes, 3 waveforms, bit-identical | FIXED — per-note Spec table |
+| M2 | MAJOR | Snare noise low-passed, no top | FIXED — centroid 223 → 936 Hz |
+| M3 | MAJOR | Drum voices cut off 40 dB down | FIXED — last sample −42.3 → −191.2 dB |
+| M4 | MAJOR | Naive saw, fold-down to −9 dBc | FIXED — PolyBLEP, −76 to −97 dBc |
+| M5 | MAJOR | Tube mode −1.6 dB and 3rd-dominant | FIXED — unity, 2nd leads by 7–19 dB |
+| M6 | MAJOR | Presets additive, "Init" a no-op | FIXED — 118/132 contaminated → 0/132 |
+| M7 | MAJOR | Notes 35–49 stolen from the instrument on all channels | LEFT OPEN — no plugin state stores notes, but the host's MIDI clips do (wave 4) |
+| M8 | MAJOR | 63.7 MB unreferenced, six stray process docs, no README | FIXED — 134 files removed, one README |
+| N1 | MINOR | Reverb diffusers are not allpasses | WITHDRAWN — they are; measured ripple 0.000 dB (wave 4) |
+| N2 | MINOR | `shapingOff` dead parameter | FIXED |
+| N3 | MINOR | Dead members (`Voice::note`, `preparedBlock`) | FIXED |
+| N4 | MINOR | Reverb pre-delay after the tank | FIXED (wave 4) — null test −118.1 dBc, automation 3.66 → 0.00 dB |
+| N5 | MINOR | Reverb param smoothing follows the block size | LEFT OPEN — inaudible, documented |
+| N6 | MINOR | `-Wshadow` at three sites | FIXED — strict set clean, enforced in CI |
+| N7 | MINOR | Undocumented always-on delay wobble | DOCUMENTED + asserted (1.55–13.5 cents) |
+| N8 | MINOR | Compressor attack ~2× the knob | FIXED (wave 4) — calibrated; 20.33 → 10.33 ms for a 10 ms knob |
+| N9 | MINOR | Width 0 mono fold differs by rounding | LEFT OPEN — −145.9 dBc |
+| N10 | MINOR | `in_gain`, `out_gain`, `drum_level` have no control on the editor | FIXED — 42 → 45 knobs |
+| N11 | MINOR | Ten knobs could only print "0" or "1"; no units | FIXED — percentages, Hz, % |
+| N12 | MAJOR | Opening the editor reset every parameter | FIXED — caught by EditorProbe |
+| N13 | MINOR | `getTailLengthSeconds()` fixed at 5 s vs a 68 s measured tail | FIXED — computed from the settings, capped at 30 s |
+
+New in wave 4: the reverb's spectral tilt (a comb-bank rebuild, 4.28 → 2.35 dB on a six-seed
+mean), and a defect in `SmokeTest`'s own RT60 estimator that read 58 % high at a 5 s decay.
+
+New in wave 5: C5 and C6 above; twenty mutations with no survivors; the denormal guard shown to be
+worth 2x on a decaying tail; an FDN reverb measured against the comb bank over six seeds and
+rejected on the numbers; and two of the repository's own instruments found wrong — the probe
+that put a 2 ms floor on the compressor's attack, and the harness call that wrote illegal values
+into on/off parameters.
+
+Test counts: 151 → 151 (`MixAgentSmokeTest`), 0 → 11 (`MixAgentAuditTest`),
+0 → 46 (`MixAgentCharacterTest`), 9 → 12 (`EditorProbe`). **160 → 220 checks** in total,
+71.3 s for the whole `ctest` run.
+
+Sanitizers: the whole suite under `-fsanitize=address,undefined` —
+`MixAgentSmokeTest` 151/151, `MixAgentAuditTest` 11/11, `MixAgentCharacterTest` 42/42, all
+exit 0 with no AddressSanitizer, LeakSanitizer or UndefinedBehaviorSanitizer report.

@@ -68,7 +68,7 @@ public:
 
     void mouseExit(const juce::MouseEvent&) override
     {
-        for (int i = 0; i < pads.size(); ++i)
+        for (int i = 0; i < (int)pads.size(); ++i)
             if (heldPads[(size_t)i]) { fireUp(pads[i].note); heldPads[(size_t)i] = false; }
         repaint();
     }
@@ -89,7 +89,7 @@ public:
         const int w = (getWidth() - (cols + 1) * gap) / cols;
         const int h = (getHeight() - (rows + 1) * gap) / rows;
 
-        for (int i = 0; i < pads.size(); ++i)
+        for (int i = 0; i < (int)pads.size(); ++i)
         {
             const int r = i / cols, c = i % cols;
             const juce::Rectangle<int> rct(gap + c * (w + gap), gap + r * (h + gap), w, h);
@@ -180,7 +180,7 @@ private:
         const int gap = 6;
         const int w = (getWidth() - (cols + 1) * gap) / cols;
         const int h = (getHeight() - (rows + 1) * gap) / rows;
-        for (int i = 0; i < pads.size(); ++i)
+        for (int i = 0; i < (int)pads.size(); ++i)
         {
             const int r = i / cols, c = i % cols;
             const juce::Rectangle<int> rct(gap + c * (w + gap), gap + r * (h + gap), w, h);

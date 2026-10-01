@@ -17,13 +17,55 @@ public:
     void resized() override;
     void timerCallback() override;
 
+    /* ---------------------------------------------------------------------
+       Measurement seams for the wave-6a visual rubric (Tests/VisualRubric.h).
+
+       This editor paints eight section headers, a logo and a MODE caption
+       itself, and it owns four meters that draw their own scales. A rig that
+       only walks the component tree sees none of it, so a clipped header or a
+       2:1 meter would be invisible to the very check that exists to catch it.
+       paint() now draws FROM these accessors, so the measurement cannot drift
+       away from the pixels.
+       --------------------------------------------------------------------- */
+    struct PaintedText
+    {
+        juce::String text;
+        juce::Rectangle<int> bounds;
+        juce::Font font { juce::FontOptions {} };
+        juce::Colour colour;
+        juce::String panel;        /* which section it belongs to */
+        /* How the text sits in its rectangle. R6 measures the contrast of the
+           GLYPHS, so it has to look where they are: MODE is centred in a 134 px
+           box, and measuring the left of that box found no glyphs at all and
+           reported 1.00:1. */
+        juce::Justification just { juce::Justification::centredLeft };
+    };
+    struct GraphicSample
+    {
+        juce::String what;
+        juce::Colour fg, bg;       /* fg may carry alpha; it is composited over bg */
+        bool surface = false;      /* a panel fill: nothing to read */
+        bool structural = false;   /* a border, a bevel, an unfilled groove */
+    };
+    struct MeterRef
+    {
+        juce::String what;
+        const agm::ui::Meter* meter;
+    };
+    juce::Array<PaintedText>   paintedTexts()   const;
+    juce::Array<GraphicSample> graphicSamples() const;
+    juce::Array<MeterRef>      meterRefs()      const;
+    /* Which section a given child component sits in, so R2 can be measured per
+       panel instead of across the whole window. */
+    juce::String panelOf (const juce::Component& c) const;
+
 private:
     agm::ui::Knob* addKnob(const juce::String& id, const juce::String& label,
-                           const juce::String& suffix = {}, int decimals = 1);
+                           const juce::String& suffix = {}, int decimals = 1,
+                           float displayScale = 1.0f);
     juce::ToggleButton* addPower(const juce::String& id);
     juce::ToggleButton* addToggle(const juce::String& id, const juce::String& text);
     void placeKnobs(float centreX, int y, const juce::Array<agm::ui::Knob*>& ks, int w = 50, int h = 72);
-    void drawHeader(juce::Graphics& g, juce::Rectangle<int> r, const char* name);
     void updateProgramList();
     void onClickFav();
     bool fullyBuilt = false;
@@ -47,6 +89,9 @@ private:
     juce::ComboBox instFilterCombo;
     juce::ToggleButton favToggle { "FAV" };
     agm::ui::Knob* instLevel = nullptr;
+    agm::ui::Knob* drumLevel = nullptr;
+    agm::ui::Knob* inTrim = nullptr;
+    agm::ui::Knob* outTrim = nullptr;
     juce::ToggleButton* instPower = nullptr;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> instProgramAttachment;
     int auditionTimerRemaining = 0;

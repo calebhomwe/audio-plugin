@@ -20,6 +20,8 @@ public:
         rmsSq = 0.0f;
         mixSmooth = mixTarget;
         mkSmooth = makeupDb;
+        thrSmooth = thresholdDb;
+        slopeSmooth = slopeFor(ratio);
         smoothedGrDb.store(0.0f, std::memory_order_relaxed);
         bypass.prepare(sr);
     }
@@ -30,6 +32,8 @@ public:
         rmsSq = 0.0f;
         mixSmooth = mixTarget;
         mkSmooth = makeupDb;
+        thrSmooth = thresholdDb;
+        slopeSmooth = slopeFor(ratio);
         smoothedGrDb.store(0.0f, std::memory_order_relaxed);
         bypass.prepare(sr);
     }
@@ -44,11 +48,11 @@ public:
         float* ch0 = buffer.getWritePointer(0);
         float* ch1 = numChannels > 1 ? buffer.getWritePointer(1) : nullptr;
 
-        const float tDb = thresholdDb;
+        const float tDbTarget = thresholdDb;
         const float k = kneeDb;
         const float halfK = k * 0.5f;
         const float invTwoK = k > 0.0f ? 1.0f / (2.0f * k) : 0.0f;
-        const float slopeFactor = 1.0f - 1.0f / ratio;
+        const float slopeTarget = slopeFor(ratio);
         const float atk = attackCoef;
         const float rel = releaseCoef;
         const float rmsC = rmsCoef;
@@ -61,6 +65,8 @@ public:
         float env = envDb;
         float rms = rmsSq;
         float mk = mkSmooth;
+        float thrS = thrSmooth;
+        float slopeS = slopeSmooth;
         float mixS = mixSmooth;
         float grMeter = smoothedGrDb.load(std::memory_order_relaxed);
 
@@ -93,23 +99,47 @@ public:
 
             env += (levelDb > env ? atk : rel) * (levelDb - env);
 
-            const float over = env - tDb;
+            // Threshold and ratio are smoothed like everything else in here: they
+            // are automation targets, and stepping them steps the gain.
+#if AGM_MUTATION(4)
+            thrS = tDbTarget;               // mutation 4: smoothing removed
+            slopeS = slopeTarget;
+#else
+            thrS += mkC * (tDbTarget - thrS);
+            slopeS += mkC * (slopeTarget - slopeS);
+#endif
+
+            const float over = env - thrS;
             float gr = 0.0f;
             if (over > halfK)
-                gr = over * slopeFactor;
+                gr = over * slopeS;
             else if (k > 0.0f && over > -halfK)
             {
                 const float x = over + halfK;
-                gr = slopeFactor * x * x * invTwoK;
+                gr = slopeS * x * x * invTwoK;
             }
+#if AGM_MUTATION(1)
+            gr = 0.0f;                      // mutation 1: the stage passes audio through
+#endif
 
             mk += mkC * (mkT - mk);
 
-            float wetGain = dbToGain(mk - gr);
+            // Gain reduction is clamped to "never boosts"; make-up gain is a
+            // separate factor, so the two cannot cancel each other out. Folding
+            // them into one value is what made the Makeup knob inert.
+            float grGain = dbToGain(-gr);
+            if (!(grGain <= 1.0f))
+                grGain = 1.0f;
+            if (!(grGain >= 0.0f))
+                grGain = 0.0f;
+            float wetGain = grGain * dbToGain(mk);
+#if AGM_MUTATION(2)
+            // mutation 2: the defect that shipped - one clamped factor for both,
+            // so the make-up term can never raise the gain above unity
+            wetGain = dbToGain(mk - gr);
             if (!(wetGain < 1.0f))
                 wetGain = 1.0f;
-            if (!(wetGain >= 0.0f))
-                wetGain = 0.0f;
+#endif
 
             grMeter += grC * (gr - grMeter);
 
@@ -125,6 +155,8 @@ public:
         envDb = std::isfinite(env) ? env : -120.0f;
         rmsSq = std::isfinite(rms) ? rms : 0.0f;
         mkSmooth = std::isfinite(mk) ? mk : mkT;
+        thrSmooth = std::isfinite(thrS) ? thrS : tDbTarget;
+        slopeSmooth = std::isfinite(slopeS) ? slopeS : slopeTarget;
         mixSmooth = std::isfinite(mixS) ? mixS : mixT;
         smoothedGrDb.store(std::isfinite(grMeter) ? grMeter : 0.0f, std::memory_order_relaxed);
     }
@@ -141,12 +173,61 @@ public:
     float getGainReductionDb() const { return smoothedGrDb.load(std::memory_order_relaxed); }
 
 private:
+    static float slopeFor(float r) { return 1.0f - 1.0f / (r > 1.0f ? r : 1.0f); }
+
+    // The Attack knob is printed in milliseconds, so it should mean milliseconds.
+    // It did not: the detector is max(peak, 1.414 * sqrt(RMS)) with an 8 ms RMS
+    // window, and that window slows the level rise, so the measured time to 63 %
+    // of the final gain reduction came out about twice the knob. The hybrid
+    // detector is the feature - it is what makes the gain reduction depend on peak
+    // level rather than crest factor, measured at 2.13 dB between a square and a
+    // sine of the same peak against the 3 dB a pure RMS detector would give - so
+    // the detector stays and the knob is calibrated against it instead.
+    //
+    // Measured at 48 kHz, 1 kHz tone, threshold -20 dB, ratio 4, -40 -> -6 dBFS
+    // step (10.5 dB of final gain reduction), the relation is linear:
+    //     measured t63 = 1.888 * internal time constant + 1.158 ms
+    // over internal 2..100 ms, residuals within 0.9 ms. This inverts it. The
+    // reference condition matters: the measured figure also depends on how deep
+    // the gain reduction is (14.8 ms at 18 dB of GR against 29.3 ms at 4.5 dB, for
+    // the same setting) and on the signal's frequency (13.8 ms at 100 Hz against
+    // 20.5 ms at 5 kHz), which is true of any log-domain one-pole detector and is
+    // not something a mapping can remove.
+    //
+    // There is no floor here worth the name. Wave 4 recorded one - "below roughly
+    // 2 ms the knob cannot be honoured, the RMS window puts a floor of about 2 ms
+    // on the detector" - and that was the test probe's own resolution, not the
+    // compressor's: it read the output peak over a 2 ms window, so 2.00 ms was the
+    // smallest figure it could print. Measured with a one-cycle window instead, the
+    // shipped 8 ms branch reaches 1.33 ms at a 2 ms knob and goes below the probe's
+    // 1.00 ms resolution under that. Shortening the window to 4 / 3 / 2 ms buys
+    // 0.5-0.9 ms in the middle of the range and would need the fit above redone for
+    // it; the crest figure below moves 2.13 -> 2.02 / 1.95 / 1.81 dB. Nothing to
+    // lift, so the window stays at 8 ms. -DMIXAGENT_COMP_RMS_MS=n re-measures it.
+    static float internalAttackMs(float knobMs)
+    {
+#if AGM_MUTATION(3)
+        return knobMs;                      // mutation 3: calibration removed
+#endif
+        const float t = (knobMs - 1.15802f) / 1.88797f;
+        return t > 0.05f ? t : 0.05f;
+    }
+
+    // The RMS branch's window. Overridable at build time only so the trade-off it
+    // sits on can be measured: -DAGM_COMP_RMS_MS=2 etc. See AUDIT.md.
+#ifdef AGM_COMP_RMS_MS
+    static constexpr double kRmsWindowMs = AGM_COMP_RMS_MS;
+#else
+    static constexpr double kRmsWindowMs = 8.0;
+#endif
+
     void updateCoefs()
     {
         const double fs = sr > 0.0 ? sr : 44100.0;
-        attackCoef = (float)std::exp(-1.0 / (attackMs * 0.001 * fs));
-        releaseCoef = (float)std::exp(-1.0 / (releaseMs * 0.001 * fs));
-        rmsCoef = (float)(1.0 - std::exp(-1.0 / (8.0 * 0.001 * fs)));
+        // one-pole step coefficients: env += coef * (target - env)
+        attackCoef = (float)(1.0 - std::exp(-1.0 / (internalAttackMs(attackMs) * 0.001 * fs)));
+        releaseCoef = (float)(1.0 - std::exp(-1.0 / (releaseMs * 0.001 * fs)));
+        rmsCoef = (float)(1.0 - std::exp(-1.0 / (kRmsWindowMs * 0.001 * fs)));
         mixCoef = (float)(1.0 - std::exp(-1.0 / (10.0 * 0.001 * fs)));
         mkCoef = (float)(1.0 - std::exp(-1.0 / (15.0 * 0.001 * fs)));
         grCoef = (float)(1.0 - std::exp(-1.0 / (50.0 * 0.001 * fs)));
@@ -172,6 +253,8 @@ private:
     float rmsSq = 0.0f;
     float mixSmooth = 1.0f;
     float mkSmooth = 0.0f;
+    float thrSmooth = -12.0f;
+    float slopeSmooth = 0.75f;
     std::atomic<float> smoothedGrDb{ 0.0f };
 
     SmoothBypass bypass;

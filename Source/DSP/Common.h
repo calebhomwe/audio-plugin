@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_dsp/juce_dsp.h>
 #include <cmath>
+#include "Mutate.h"
 
 namespace agm {
 
@@ -8,6 +9,19 @@ inline float dbToGain(float db) { return juce::Decibels::decibelsToGain(db); }
 inline float gainToDb(float g) { return juce::Decibels::gainToDecibels(g); }
 
 inline float sanitize(float x, float fallback = 0.0f) { return std::isfinite(x) ? x : fallback; }
+
+// Soft limiter for the internal instrument/drum bus: unity below the knee,
+// tanh-shaped above it, output bounded to (-1, 1). Not applied to host audio.
+inline float softClipBus(float x)
+{
+    constexpr float knee = 0.85f;
+    constexpr float span = 1.0f - knee;
+    if (!std::isfinite(x)) return 0.0f;
+    const float a = std::fabs(x);
+    if (a <= knee) return x;
+    const float shaped = knee + span * std::tanh((a - knee) / span);
+    return x < 0.0f ? -shaped : shaped;
+}
 
 class OnePole
 {

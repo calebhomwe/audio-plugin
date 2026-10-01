@@ -1,5 +1,6 @@
 #pragma once
 #include <juce_gui_basics/juce_gui_basics.h>
+#include "../DSP/Mutate.h"
 
 namespace agm {
 namespace ui {
@@ -9,7 +10,17 @@ const juce::Colour kPanel     = juce::Colour(0xff16161c);
 const juce::Colour kPanelHi   = juce::Colour(0xff1e1e26);
 const juce::Colour kBorder    = juce::Colour(0xff2a2a34);
 const juce::Colour kText      = juce::Colour(0xfff2f2f7);
+/* 0x77778a measured 3.94:1 against the panel fill it is read on - under the
+   4.5:1 floor - and that colour carries every knob caption, every section header,
+   the IN/OUT labels, the MODE caption and the pad strip. Same hue, lighter:
+   5.77:1 declared, which leaves room for the anti-aliasing of 8.5 px type. */
+#if AGM_MUTATION(22)
+// M22: the secondary text colour back to 0x77778a - 3.94:1 declared against the
+// panel, and 2.35:1 rendered at 8.5 px.
 const juce::Colour kTextDim   = juce::Colour(0xff77778a);
+#else
+const juce::Colour kTextDim   = juce::Colour(0xff9494a6);
+#endif
 const juce::Colour kAccent    = juce::Colour(0xffff6b1a);
 const juce::Colour kAccentHot = juce::Colour(0xffffa640);
 const juce::Colour kAccentDim = juce::Colour(0x66ff6b1a);
@@ -46,12 +57,34 @@ inline void panelBevel(juce::Graphics& g, juce::Rectangle<float> r, float corner
 class PowerToggle : public juce::ToggleButton
 {
 public:
-    explicit PowerToggle(const juce::String& text = {})
+    explicit PowerToggle(const juce::String& label = {})
     {
-        setButtonText(text);
+        setButtonText(label);
         setClickingTogglesState(true);
-        setTooltip(text);
+        setTooltip(label);
     }
+
+    /* The rectangle and the font this toggle's caption is ACTUALLY drawn in.
+       PowerToggle overrides drawToggleButton entirely, so the generic
+       "JUCE leaves room for a tick box" geometry a visual rubric would assume is
+       simply wrong here - it measured "MONO" as needing 41.8 px in 34 and called
+       it clipped when it has 44. paint() draws from these, so the measurement and
+       the pixels are one source. */
+    juce::Rectangle<int> textBox() const
+    {
+        return getLocalBounds().withTrimmedLeft(16).withTrimmedRight(4);
+    }
+
+    static juce::Font textFont()
+    {
+        return juce::Font(juce::FontOptions(9.5f, juce::Font::bold));
+    }
+
+    /* The LED and ring colours this toggle paints, so the editor's R7 table and
+       paint() are one source rather than two that can disagree. */
+    static juce::Colour ledOnColour()   { return kAccent; }
+    static juce::Colour ledOffColour()  { return kTextDim; }
+    static juce::Colour ringOffColour() { return kTextDim; }
 
     void paint(juce::Graphics& g) override
     {
@@ -82,12 +115,15 @@ public:
                 g.setColour(kAccent.withAlpha(0.3f));
                 g.fillEllipse(led.expanded(2.5f));
             }
-            g.setColour(on ? kAccent : kTextDim.withAlpha(0.45f));
+            /* Was kTextDim.withAlpha(0.45f): 1.80:1 against the panel, under R7's
+               3:1 floor for an indicator. An off power LED you cannot see is a
+               control you cannot find. */
+            g.setColour(on ? ledOnColour() : ledOffColour());
             g.fillEllipse(led);
 
             g.setColour(on ? kText : kTextDim);
-            g.setFont(juce::Font(juce::FontOptions(9.5f, juce::Font::bold)));
-            g.drawText(getButtonText(), r.withTrimmedLeft(16.0f).withTrimmedRight(4.0f),
+            g.setFont(textFont());
+            g.drawText(getButtonText(), textBox().toFloat(),
                        juce::Justification::centredLeft, false);
             return;
         }
@@ -99,7 +135,9 @@ public:
             g.setColour(kAccent.withAlpha(0.22f));
             g.fillEllipse(led.expanded(3.0f));
         }
-        g.setColour(on ? kAccent : kBorder);
+        /* Was kBorder: 1.22:1 against the panel. Same reason as above - the ring is
+           the only thing that says "there is a switch here" when it is off. */
+        g.setColour(on ? ledOnColour() : ringOffColour());
         g.drawEllipse(led, 1.5f);
         g.setColour(on ? kAccent : kPanelHi);
         g.fillEllipse(led.reduced(2.5f));

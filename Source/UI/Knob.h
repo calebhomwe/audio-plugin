@@ -9,8 +9,13 @@ namespace ui {
 class Knob : public juce::Slider
 {
 public:
-    Knob(const juce::String& label, const juce::String& suffix = {})
-        : label_(label), suffix_(suffix)
+    // `scale` and `decimals` control the READOUT only, never the value: a 0..1
+    // parameter reads as 0..100 % with scale 100, and a frequency reads in whole
+    // hertz. Without this, ten 0..1 controls were drawn with zero decimals and
+    // could only ever show "0" or "1".
+    Knob(const juce::String& label, const juce::String& suffix = {},
+         float scale = 1.0f, int decimals = 1)
+        : label_(label), suffix_(suffix), scale_(scale), decimals_(decimals)
     {
         setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
         setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
@@ -39,11 +44,11 @@ public:
         const float thickness = juce::jmax(2.5f, side * 0.075f);
         const juce::PathStrokeType stroke(thickness, juce::PathStrokeType::curved, juce::PathStrokeType::rounded);
 
-        const juce::Colour accentTop(hot ? 0xffffc07a : 0xffffa640);
-        const juce::Colour accentBottom(hot ? 0xffff8b3d : 0xffff6b1a);
-        const juce::Colour glowTint(0x33ff6b1a);
-        const juce::Colour faceLight(hot ? 0xff36363f : 0xff33333d);
-        const juce::Colour faceDark(hot ? 0xff1c1c22 : 0xff16161c);
+        const juce::Colour accentTop(hot ? kArcTopHot : kArcTop);
+        const juce::Colour accentBottom(hot ? kArcBottomHot : kArcBottom);
+        const juce::Colour glowTint(kArcGlow);
+        const juce::Colour faceLight(hot ? kFaceLightHot : kFaceLight);
+        const juce::Colour faceDark(hot ? kFaceDarkHot : kFaceDark);
 
         const float sinV = std::sin(valueAngle);
         const float cosV = std::cos(valueAngle);
@@ -57,11 +62,11 @@ public:
                                       true);
             g.setFillType(juce::FillType(face));
             g.fillEllipse(centre.getX() - discR, centre.getY() - discR, discR * 2.0f, discR * 2.0f);
-            g.setColour(kBorder.brighter(hot ? 0.12f : 0.0f));
+            g.setColour(juce::Colour(kDiscOutline).brighter(hot ? 0.12f : 0.0f));
             g.drawEllipse(centre.getX() - discR, centre.getY() - discR, discR * 2.0f, discR * 2.0f, 1.0f);
         }
 
-        g.setColour(kTextDim.withAlpha(0.30f));
+        g.setColour(tickColour());
         for (int i = 0; i < 5; ++i)
         {
             const float a = arcOffset + (float)i / 4.0f * (endAngle - startAngle);
@@ -73,7 +78,7 @@ public:
         juce::Path track;
         track.addCentredArc(centre.getX(), centre.getY(), radius, radius, 0.0f,
                             arcOffset, arcOffset + (endAngle - startAngle), true);
-        g.setColour(kBorder);
+        g.setColour(trackColour());
         g.strokePath(track, stroke);
 
         if (prop > 0.002f)
@@ -106,33 +111,107 @@ public:
             juce::Path stroked;
             juce::PathStrokeType(2.0f, juce::PathStrokeType::beveled,
                                  juce::PathStrokeType::rounded).createStrokedPath(stroked, needle);
-            g.setColour(kText);
+            g.setColour(needleColour());
             g.fillPath(stroked);
         }
 
+        /* Drawn from drawnTexts(), which is also what the visual rubric measures.
+           A knob paints its own caption and its own readout, so a rig that walks
+           the component tree sees neither; and drawFitted() condenses a string
+           that does not fit instead of clipping it, so "the required width" is
+           only meaningful if the measurement knows the condensed font. One
+           source for both. */
+        for (const auto& t : drawnTexts())
+        {
+            g.setColour(t.colour);
+            g.setFont(t.font);
+            g.drawText(t.text, t.bounds, juce::Justification::centred, false);
+        }
+    }
+
+    /* A string this knob paints for itself, with the rectangle it is drawn in and
+       the font it is ACTUALLY drawn with - horizontal scale included, because
+       drawFitted() condenses rather than clips. */
+    struct DrawnText
+    {
+        juce::String text;
+        juce::Rectangle<int> bounds;
+        juce::Font font { juce::FontOptions {} };
+        juce::Colour colour;
+        bool isReadout = false;
+        /* 1.0 when the string fitted; below 1.0 by the factor drawFitted() had to
+           condense it. It bottoms out at 0.55, and at the floor the text IS
+           clipped. */
+        float condensed = 1.0f;
+    };
+
+    juce::Array<DrawnText> drawnTexts() const
+    {
+        juce::Array<DrawnText> out;
+        const auto bounds = getLocalBounds().toFloat();
+        const float side = juce::jmin(bounds.getWidth(), bounds.getHeight() - 24.0f);
+        if (side <= 4.0f)
+            return out;
         auto textArea = bounds.withTrimmedTop(side).reduced(1.0f, 0.0f);
-        g.setColour(kTextDim);
-        drawFitted(g, label_.toUpperCase(),
-                   textArea.removeFromTop(textArea.getHeight() * 0.45f),
-                   juce::FontOptions(8.5f));
-        g.setColour(kText);
-        drawFitted(g, getTextFromValue(getValue()) + suffix_, textArea,
-                   juce::FontOptions(10.5f, juce::Font::bold));
+        const auto captionArea = textArea.removeFromTop(textArea.getHeight() * 0.45f);
+        out.add(fitted(label_.toUpperCase(), captionArea, juce::FontOptions(8.5f), kTextDim, false));
+        out.add(fitted(readout(), textArea, juce::FontOptions(10.5f, juce::Font::bold), kText, true));
+        return out;
+    }
+
+    /* The dial's own colours, and the pairs R7 is measured on. paint() draws from
+       these: a colour literal inside paint() and a separate table in the editor are
+       two sources that can disagree, which is how a mutation of a rim colour once
+       survived a rule that was supposed to be measuring it. */
+    static constexpr juce::uint32 kArcTop       = 0xffffa640, kArcTopHot    = 0xffffc07a;
+    static constexpr juce::uint32 kArcBottom    = 0xffff6b1a, kArcBottomHot = 0xffff8b3d;
+    static constexpr juce::uint32 kArcGlow      = 0x33ff6b1a;
+    static constexpr juce::uint32 kFaceLight    = 0xff33333d, kFaceLightHot = 0xff36363f;
+    static constexpr juce::uint32 kFaceDark     = 0xff16161c, kFaceDarkHot  = 0xff1c1c22;
+    static constexpr juce::uint32 kDiscOutline  = 0xff2a2a34;
+
+    static juce::Colour trackColour()  { return juce::Colour(kDiscOutline); }
+    static juce::Colour tickColour()   { return kTextDim.withAlpha(0.30f); }
+    static juce::Colour needleColour() { return kText; }
+    static juce::Colour faceColour()   { return juce::Colour(kFaceDark); }
+
+    struct ColourPair { const char* what; juce::Colour fg, bg; bool structural; };
+
+    static juce::Array<ColourPair> indicatorColours()
+    {
+        juce::Array<ColourPair> out;
+        out.add({ "knob track (unfilled groove)", trackColour(),            faceColour(), true  });
+        out.add({ "knob tick ring",               tickColour(),             faceColour(), true  });
+        out.add({ "knob value arc",               juce::Colour(kArcBottom), faceColour(), false });
+        out.add({ "knob needle",                  needleColour(),           faceColour(), false });
+        return out;
+    }
+
+    juce::String readout() const
+    {
+        return juce::String(getValue() * (double)scale_, decimals_) + suffix_;
     }
 
 private:
-    static void drawFitted(juce::Graphics& g, const juce::String& text,
-                           juce::Rectangle<float> area, const juce::FontOptions& options)
+    /* The condensing drawFitted() used to do inline, returned as data so paint()
+       and the rubric cannot disagree about what was drawn. */
+    static DrawnText fitted(const juce::String& text, juce::Rectangle<float> area,
+                            const juce::FontOptions& options, juce::Colour colour, bool isReadout)
     {
+        DrawnText t;
+        t.text = text;
+        t.bounds = area.getSmallestIntegerContainer();
+        t.colour = colour;
+        t.isReadout = isReadout;
         juce::Font f(options);
-        g.setFont(f);
-        const int w = g.getCurrentFont().getStringWidth(text);
+        const int w = (int)std::ceil(juce::GlyphArrangement::getStringWidth(f, text));
         if (w > area.getWidth() && w > 0)
         {
-            f.setHorizontalScale(juce::jmax(0.55f, (float)area.getWidth() / (float)w));
-            g.setFont(f);
+            t.condensed = juce::jmax(0.55f, (float)area.getWidth() / (float)w);
+            f.setHorizontalScale(t.condensed);
         }
-        g.drawText(text, area, juce::Justification::centred, false);
+        t.font = f;
+        return t;
     }
 
     void mouseEnter(const juce::MouseEvent&) override { repaint(); }
@@ -140,6 +219,8 @@ private:
 
     juce::String label_;
     juce::String suffix_;
+    float scale_ = 1.0f;
+    int decimals_ = 1;
 };
 
 } // namespace ui
