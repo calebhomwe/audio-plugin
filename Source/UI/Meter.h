@@ -48,6 +48,32 @@ public:
             paintGr(g, dt);
     }
 
+    /* What scale this meter carries, for R13. Reported by the meter itself rather
+       than guessed by the test, so it cannot claim a tick it does not draw.
+
+       Level: nothing. The bar is a 60 dB range with no tick, no label and no
+       0 dBFS reference; the only mark is a peak-hold line, which is a value and
+       not a scale.
+       GainReduction: up to three horizontal rules at 6, 12 and 18 dB of the 24 dB
+       range - UNLABELLED - plus a numeric readout at the foot, which is again a
+       value and not a reference mark. */
+    struct ScaleInfo
+    {
+        int  ticks = 0;            /* tick marks drawn */
+        int  labelledTicks = 0;    /* of those, how many carry a number or a word */
+        bool referenceMark = false;/* a 0 dBFS / unity line */
+        const char* note = "";
+    };
+
+    ScaleInfo scaleInfo() const
+    {
+        if (kind_ == Kind::Level)
+            return { 0, 0, false, "60 dB bar, no ticks, no labels, no 0 dBFS reference" };
+        const auto area = getLocalBounds().reduced(3);
+        const int n = juce::jmin(3, juce::roundToInt((float)area.getHeight() / kGrRange));
+        return { n, 0, false, "unlabelled rules every 6 dB of 24, no reference mark" };
+    }
+
     void resized() override
     {
         if (kind_ != Kind::Level)
@@ -199,7 +225,11 @@ private:
             {
                 const float y = (float)area.getY() + (float)area.getHeight()
                               * ((float)i * 6.0f / kGrRange);
-                g.setColour(kBorder.withAlpha(0.35f));
+                /* Was kBorder.withAlpha(0.35f): 1.08:1 against the meter's own
+                   background - a scale that is not there. These three rules are
+                   this meter's only scale, so they are the one thing on it that
+                   has to be visible. */
+                g.setColour(kTextDim.withAlpha(0.8f));
                 g.drawHorizontalLine(juce::roundToInt(y), x + barW + 2.0f, (float)area.getRight());
             }
         }

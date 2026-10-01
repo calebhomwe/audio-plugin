@@ -115,14 +115,55 @@ public:
             g.fillPath(stroked);
         }
 
-        auto textArea = bounds.withTrimmedTop(side).reduced(1.0f, 0.0f);
-        g.setColour(kTextDim);
-        drawFitted(g, label_.toUpperCase(),
-                   textArea.removeFromTop(textArea.getHeight() * 0.45f),
-                   juce::FontOptions(8.5f));
-        g.setColour(kText);
-        drawFitted(g, readout(), textArea, juce::FontOptions(10.5f, juce::Font::bold));
+        /* Drawn from drawnTexts(), which is also what the visual rubric measures.
+           A knob paints its own caption and its own readout, so a rig that walks
+           the component tree sees neither; and drawFitted() condenses a string
+           that does not fit instead of clipping it, so "the required width" is
+           only meaningful if the measurement knows the condensed font. One
+           source for both. */
+        for (const auto& t : drawnTexts())
+        {
+            g.setColour(t.colour);
+            g.setFont(t.font);
+            g.drawText(t.text, t.bounds, juce::Justification::centred, false);
+        }
     }
+
+    /* A string this knob paints for itself, with the rectangle it is drawn in and
+       the font it is ACTUALLY drawn with - horizontal scale included, because
+       drawFitted() condenses rather than clips. */
+    struct DrawnText
+    {
+        juce::String text;
+        juce::Rectangle<int> bounds;
+        juce::Font font { juce::FontOptions {} };
+        juce::Colour colour;
+        bool isReadout = false;
+        /* 1.0 when the string fitted; below 1.0 by the factor drawFitted() had to
+           condense it. It bottoms out at 0.55, and at the floor the text IS
+           clipped. */
+        float condensed = 1.0f;
+    };
+
+    juce::Array<DrawnText> drawnTexts() const
+    {
+        juce::Array<DrawnText> out;
+        const auto bounds = getLocalBounds().toFloat();
+        const float side = juce::jmin(bounds.getWidth(), bounds.getHeight() - 24.0f);
+        if (side <= 4.0f)
+            return out;
+        auto textArea = bounds.withTrimmedTop(side).reduced(1.0f, 0.0f);
+        const auto captionArea = textArea.removeFromTop(textArea.getHeight() * 0.45f);
+        out.add(fitted(label_.toUpperCase(), captionArea, juce::FontOptions(8.5f), kTextDim, false));
+        out.add(fitted(readout(), textArea, juce::FontOptions(10.5f, juce::Font::bold), kText, true));
+        return out;
+    }
+
+    /* The knob's dial, for R7: the value arc and the track it sits on. */
+    juce::Colour trackColour()     const { return kBorder; }
+    juce::Colour valueArcColour()  const { return juce::Colour(0xffff6b1a); }
+    juce::Colour needleColour()    const { return kText; }
+    juce::Colour faceColour()      const { return juce::Colour(0xff16161c); }
 
     juce::String readout() const
     {
@@ -130,18 +171,25 @@ public:
     }
 
 private:
-    static void drawFitted(juce::Graphics& g, const juce::String& text,
-                           juce::Rectangle<float> area, const juce::FontOptions& options)
+    /* The condensing drawFitted() used to do inline, returned as data so paint()
+       and the rubric cannot disagree about what was drawn. */
+    static DrawnText fitted(const juce::String& text, juce::Rectangle<float> area,
+                            const juce::FontOptions& options, juce::Colour colour, bool isReadout)
     {
+        DrawnText t;
+        t.text = text;
+        t.bounds = area.getSmallestIntegerContainer();
+        t.colour = colour;
+        t.isReadout = isReadout;
         juce::Font f(options);
-        g.setFont(f);
-        const int w = (int)std::ceil(juce::GlyphArrangement::getStringWidth(g.getCurrentFont(), text));
+        const int w = (int)std::ceil(juce::GlyphArrangement::getStringWidth(f, text));
         if (w > area.getWidth() && w > 0)
         {
-            f.setHorizontalScale(juce::jmax(0.55f, (float)area.getWidth() / (float)w));
-            g.setFont(f);
+            t.condensed = juce::jmax(0.55f, (float)area.getWidth() / (float)w);
+            f.setHorizontalScale(t.condensed);
         }
-        g.drawText(text, area, juce::Justification::centred, false);
+        t.font = f;
+        return t;
     }
 
     void mouseEnter(const juce::MouseEvent&) override { repaint(); }

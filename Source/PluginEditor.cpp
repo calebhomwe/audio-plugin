@@ -6,6 +6,25 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
 {
     setSize(1160, 920);
 
+    /* Component ids throughout: a visual rubric that reports "(Label) at 22,12 is
+       off the grid" names nothing, and this editor had set no id on anything. */
+    logoLabel.setComponentID("logo");
+    subLabel.setComponentID("strapline");
+    inLabel.setComponentID("label_in");
+    outLabel.setComponentID("label_out");
+    padLabel.setComponentID("label_pads");
+    presetCombo.setComponentID("combo_preset");
+    satModeCombo.setComponentID("combo_sat_mode");
+    instProgramCombo.setComponentID("combo_inst_program");
+    instFilterCombo.setComponentID("combo_inst_filter");
+    favToggle.setComponentID("toggle_fav");
+    inMeter.setComponentID("meter_in");
+    outMeter.setComponentID("meter_out");
+    compMeter.setComponentID("meter_comp_gr");
+    limMeter.setComponentID("meter_lim_gr");
+    spectrum.setComponentID("spectrum");
+    padGrid.setComponentID("pad_grid");
+
     logoLabel.setText("", juce::dontSendNotification);
     logoLabel.setFont(juce::Font(juce::FontOptions(24.0f, juce::Font::bold)));
     logoLabel.setColour(juce::Label::textColourId, agm::ui::kText);
@@ -110,7 +129,11 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
 
     compT = addKnob("comp_thresh", "THRESH", " dB", 0);
     compR = addKnob("comp_ratio", "RATIO", ":1", 1);
-    compA = addKnob("comp_attack", "ATTACK", " ms", 0);
+    /* 0.1..100 ms at 0 decimals printed "0 ms" at the bottom of its range: a
+       readout that cannot show its own value. The sibling of the defect this
+       repository already fixed once ("ten controls with a 0..1 range were drawn
+       with zero decimal places"). */
+    compA = addKnob("comp_attack", "ATTACK", " ms", 1);
     compRel = addKnob("comp_release", "RELEASE", " ms", 0);
     compK = addKnob("comp_knee", "KNEE", " dB", 0);
     compMix = addKnob("comp_mix", "MIX", " %", 0, 100.0f);
@@ -132,7 +155,11 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
     dlyW->textFromValueFunction = pctText;
 
     rvbS = addKnob("rvb_size", "SIZE", " %", 0, 100.0f);
-    rvbDc = addKnob("rvb_decay", "DECAY", " s", 1);
+    /* Was " s", 1 decimal, beside PRE-DELAY in " ms" - two time units in one
+       panel, which is the defect that makes two times incomparable at a glance.
+       The scale argument converts for the READOUT only; the parameter is still
+       seconds. 0.2..10 s reads 200..10000 ms. */
+    rvbDc = addKnob("rvb_decay", "DECAY", " ms", 0, 1000.0f);
     rvbD = addKnob("rvb_damp", "DAMP", " %", 0, 100.0f);
     rvbD->textFromValueFunction = pctText;
     rvbW = addKnob("rvb_width", "WIDTH", " %", 0, 100.0f);
@@ -142,7 +169,8 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
     rvbP = addKnob("rvb_predelay", "PRE-DELAY", " ms", 0);
 
     limC = addKnob("lim_ceiling", "CEILING", " dB", 1);
-    limA = addKnob("lim_attack", "ATTACK", " ms", 1);
+    /* 0.01..10 ms at 1 decimal printed "0.0 ms" at the bottom of its range. */
+    limA = addKnob("lim_attack", "ATTACK", " ms", 2);
     limR = addKnob("lim_release", "RELEASE", " ms", 0);
 
     padLabel.setFont(juce::Font(juce::FontOptions(9.0f, juce::Font::bold)));
@@ -215,6 +243,7 @@ agm::ui::Knob* MixAgentAudioProcessorEditor::addKnob(const juce::String& id, con
                                                      float displayScale)
 {
     auto* knob = knobs.add(new agm::ui::Knob(label, suffix, displayScale, decimals));
+    knob->setComponentID("knob_" + id);
     knob->setNumDecimalPlacesToDisplay(decimals);
     if (auto* p = dynamic_cast<juce::RangedAudioParameter*>(proc.getAPVTS().getParameter(id)))
     {
@@ -234,6 +263,7 @@ agm::ui::Knob* MixAgentAudioProcessorEditor::addKnob(const juce::String& id, con
 juce::ToggleButton* MixAgentAudioProcessorEditor::addPower(const juce::String& id)
 {
     auto* t = powerToggles.add(new agm::ui::PowerToggle());
+    t->setComponentID("power_" + id);
     buttonAttachments.add(new juce::AudioProcessorValueTreeState::ButtonAttachment(proc.getAPVTS(), id, *t));
     addAndMakeVisible(t);
     return t;
@@ -242,6 +272,7 @@ juce::ToggleButton* MixAgentAudioProcessorEditor::addPower(const juce::String& i
 juce::ToggleButton* MixAgentAudioProcessorEditor::addToggle(const juce::String& id, const juce::String& text)
 {
     auto* t = new agm::ui::PowerToggle(text);
+    t->setComponentID("toggle_" + id);
     buttonAttachments.add(new juce::AudioProcessorValueTreeState::ButtonAttachment(proc.getAPVTS(), id, *t));
     addAndMakeVisible(t);
     return t;
@@ -288,19 +319,6 @@ void MixAgentAudioProcessorEditor::placeKnobs(float centreX, int y, const juce::
         k->setBounds(x, y, w, h);
         x += w + gap;
     }
-}
-
-void MixAgentAudioProcessorEditor::drawHeader(juce::Graphics& g, juce::Rectangle<int> r, const char* name)
-{
-    g.setColour(agm::ui::kTextDim);
-    g.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
-    g.drawText(name, r.getX() + 10, r.getY() + 3, r.getWidth() - 20, 20, juce::Justification::centredLeft);
-    const float w = juce::GlyphArrangement::getStringWidth(g.getCurrentFont(), name);
-    const float ux = (float)(r.getX() + 10);
-    const float uy = (float)(r.getY() + 24);
-    g.setGradientFill(juce::ColourGradient(agm::ui::kAccent, ux, uy,
-                                           agm::ui::kAccent.withAlpha(0.0f), ux + w + 34.0f, uy, false));
-    g.fillRect(ux, uy, w + 34.0f, 2.0f);
 }
 
 void MixAgentAudioProcessorEditor::paint(juce::Graphics& g)
@@ -353,36 +371,119 @@ void MixAgentAudioProcessorEditor::paint(juce::Graphics& g)
                    juce::jmax(0.0f, dr.getWidth() - corner * 2.0f), 1.0f);
     }
 
-    drawHeader(g, eqSection, "EQUALIZER");
-    drawHeader(g, panels[0], "SATURATION");
-    drawHeader(g, panels[1], "COMPRESSOR");
-    drawHeader(g, panels[2], "STEREO IMAGER");
-    drawHeader(g, panels[3], "DELAY");
-    drawHeader(g, panels[4], "REVERB");
-    drawHeader(g, panels[5], "LIMITER");
-
+    /* Every string this editor paints for itself comes from paintedTexts(), which
+       is also what the rubric measures. The underline each section header carries
+       is drawn from the same geometry. */
+    for (const auto& t : paintedTexts())
     {
-        const char* name = "INSTRUMENT LIBRARY";
-        g.setColour(agm::ui::kAccentHot);
-        g.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
-        g.drawText(name, drumRect.getX() + 34, drumRect.getY() + 3, drumRect.getWidth() - 44, 20,
-                   juce::Justification::centredLeft);
-        const float w = juce::GlyphArrangement::getStringWidth(g.getCurrentFont(), name);
-        const float ux = (float)(drumRect.getX() + 34);
-        const float uy = (float)(drumRect.getY() + 24);
-        g.setGradientFill(juce::ColourGradient(agm::ui::kAccent, ux, uy,
-                                               agm::ui::kAccent.withAlpha(0.0f), ux + w + 34.0f, uy, false));
-        g.fillRect(ux, uy, w + 34.0f, 2.0f);
+        g.setColour(t.colour);
+        g.setFont(t.font);
+        g.drawText(t.text, t.bounds, t.just, false);
+        if (t.panel.isNotEmpty() && t.text != "MODE" && t.text != "MIXAGENT")
+        {
+            const float w = juce::GlyphArrangement::getStringWidth(t.font, t.text);
+            const float ux = (float)t.bounds.getX();
+            const float uy = (float)t.bounds.getBottom() + 1.0f;
+            g.setGradientFill(juce::ColourGradient(agm::ui::kAccent, ux, uy,
+                                                   agm::ui::kAccent.withAlpha(0.0f),
+                                                   ux + w + 34.0f, uy, false));
+            g.fillRect(ux, uy, w + 34.0f, 2.0f);
+        }
     }
+}
 
+/* ------------------------------------------------------------------------- */
+/* The eight headers, the logo and the MODE caption, with the rectangle and the
+   font each one is actually drawn with. */
+juce::Array<MixAgentAudioProcessorEditor::PaintedText>
+MixAgentAudioProcessorEditor::paintedTexts() const
+{
+    const juce::Font header(juce::FontOptions(11.0f, juce::Font::bold));
+    juce::Array<PaintedText> out;
+    auto addHeader = [&] (juce::Rectangle<int> r, const char* name, const char* panel,
+                          int inset, juce::Colour colour)
+    {
+        out.add({ name, { r.getX() + inset, r.getY() + 3, r.getWidth() - inset - 10, 20 },
+                  header, colour, panel });
+    };
+    out.add({ "MIXAGENT",
+              topBarRect.reduced(14, 0).withWidth(220).withY(topBarRect.getY() + 4).withHeight(36),
+              juce::Font(juce::FontOptions(24.0f, juce::Font::bold)), agm::ui::kText, "top bar" });
+    addHeader(eqSection, "EQUALIZER",     "equaliser", 10, agm::ui::kTextDim);
+    addHeader(panels[0], "SATURATION",    "saturation", 10, agm::ui::kTextDim);
+    addHeader(panels[1], "COMPRESSOR",    "compressor", 10, agm::ui::kTextDim);
+    addHeader(panels[2], "STEREO IMAGER", "imager",     10, agm::ui::kTextDim);
+    addHeader(panels[3], "DELAY",         "delay",      10, agm::ui::kTextDim);
+    addHeader(panels[4], "REVERB",        "reverb",     10, agm::ui::kTextDim);
+    addHeader(panels[5], "LIMITER",       "limiter",    10, agm::ui::kTextDim);
+    addHeader(drumRect,  "INSTRUMENT LIBRARY", "instruments", 34, agm::ui::kAccentHot);
     const auto combo = satModeCombo.getBounds();
     if (combo.getHeight() > 0)
-    {
-        g.setColour(agm::ui::kTextDim);
-        g.setFont(juce::Font(juce::FontOptions(8.5f, juce::Font::bold)));
-        g.drawText("MODE", combo.withHeight(12).withY(combo.getY() - 14),
-                   juce::Justification::centred, false);
-    }
+        out.add({ "MODE", combo.withHeight(12).withY(combo.getY() - 14),
+                  juce::Font(juce::FontOptions(8.5f, juce::Font::bold)), agm::ui::kTextDim,
+                  "saturation", juce::Justification::centred });
+    return out;
+}
+
+/* The painted graphics R7 is measured on, each foreground paired with the colour
+   it is actually drawn OVER so an alpha is composited rather than assumed away. */
+juce::Array<MixAgentAudioProcessorEditor::GraphicSample>
+MixAgentAudioProcessorEditor::graphicSamples() const
+{
+    using namespace agm::ui;
+    const juce::Colour panelMid = kPanelHi.interpolatedWith(kPanel, 0.5f);
+    juce::Array<GraphicSample> out;
+    /* surface:   a fill, not something to read.
+       structural: a panel border, a bevel, a knob's unfilled groove, its tick ring.
+                   Reported, not asserted - see Tests/VisualRubric.h.
+       otherwise:  an INDICATOR: it carries state, a value or a scale, and R7 is
+                   asserted on it. */
+    out.add({ "panel fill over canvas",    panelMid,   kBg,      true  });
+    out.add({ "panel border",              kBorder,    panelMid, false, true });
+    out.add({ "panel top highlight",       juce::Colours::white.withAlpha(0.25f), panelMid, false, true });
+    out.add({ "knob track (unfilled groove)", kBorder, kPanel,   false, true });
+    out.add({ "knob tick ring",            kTextDim.withAlpha(0.30f), kPanel, false, true });
+    out.add({ "header rule under a title", kAccent,    panelMid, false });
+    out.add({ "knob value arc",            kAccentHot, kPanel,   false });
+    out.add({ "knob needle",               kText,      juce::Colour(0xff16161c), false });
+    out.add({ "power LED, off",            kTextDim,   panelMid, false });
+    out.add({ "power LED, on",             kAccent,    panelMid, false });
+    out.add({ "power ring, off",           kTextDim,   panelMid, false });
+    out.add({ "level meter, low",          kMeterLo,   kBg,      false });
+    out.add({ "level meter, high",         kMeterHi,   kBg,      false });
+    out.add({ "level meter, clip",         kMeterClip, kBg,      false });
+    out.add({ "level meter peak hold",     kText.withAlpha(0.8f), kBg, false });
+    out.add({ "gain-reduction bar",        kAccent,    kBg,      false });
+    out.add({ "gain-reduction tick",       kTextDim.withAlpha(0.8f), kBg, false });
+    out.add({ "drum panel cyan rule",      kCyan,      panelMid, false });
+    out.add({ "pad, lit",                  kPadLit,    kPanel,   false });
+    return out;
+}
+
+juce::Array<MixAgentAudioProcessorEditor::MeterRef>
+MixAgentAudioProcessorEditor::meterRefs() const
+{
+    juce::Array<MeterRef> out;
+    out.add({ "input level meter",            &inMeter });
+    out.add({ "output level meter",           &outMeter });
+    out.add({ "compressor gain reduction",    &compMeter });
+    out.add({ "limiter gain reduction",       &limMeter });
+    return out;
+}
+
+/* Which section a child sits in: the rectangle that contains its centre. R2's
+   "time units are consistent within a panel" has no meaning without this. */
+juce::String MixAgentAudioProcessorEditor::panelOf (const juce::Component& c) const
+{
+    const auto centre = c.getBounds().getCentre();
+    if (topBarRect.contains(centre)) return "top bar";
+    if (eqSection.contains(centre))  return "equaliser";
+    if (drumRect.contains(centre))   return "instruments";
+    static const char* const names[6] = { "saturation", "compressor", "imager",
+                                          "delay", "reverb", "limiter" };
+    for (int i = 0; i < 6; ++i)
+        if (panels[i].contains(centre)) return names[i];
+    return "unplaced";
 }
 
 void MixAgentAudioProcessorEditor::resized()
@@ -413,7 +514,10 @@ void MixAgentAudioProcessorEditor::resized()
     inLabel.setBounds(t.removeFromRight(30).withSizeKeepingCentre(30, 12));
     inMeter.setBounds(t.removeFromRight(14).withSizeKeepingCentre(14, 36));
 
-    powerToggles[0]->setBounds(eqSection.getRight() - 30, eqSection.getY() + 7, 18, 16);
+    /* 24x24, not 18x16. Thirteen controls on this editor were under the 24 px hit
+       target floor and the eight section power switches were the smallest at
+       18x16. The header band is 27 px tall, so 24 px at y+2 still sits inside it. */
+    powerToggles[0]->setBounds(eqSection.getRight() - 34, eqSection.getY() + 2, 24, 24);
 
     spectrum.setBounds(eqSection.getX() + 10, eqSection.getY() + 32, eqSection.getWidth() - 20, 98);
 
@@ -422,9 +526,9 @@ void MixAgentAudioProcessorEditor::resized()
     auto cx = [&](int i) { return eqSection.getX() + (i + 0.5f) * cw; };
 
     hpKnob->setBounds((int)cx(0) - 2, knobY, 50, 72);
-    hpToggle->setBounds((int)cx(0) - 56, knobY + 27, 48, 18);
+    hpToggle->setBounds((int)cx(0) - 56, knobY + 24, 48, 24);
     lpKnob->setBounds((int)cx(6) - 2, knobY, 50, 72);
-    lpToggle->setBounds((int)cx(6) - 56, knobY + 27, 48, 18);
+    lpToggle->setBounds((int)cx(6) - 56, knobY + 24, 48, 24);
     placeKnobs(cx(1), knobY, { lsfF, lsfG });
     placeKnobs(cx(2), knobY, { p1F, p1G, p1Q });
     placeKnobs(cx(3), knobY, { p2F, p2G, p2Q });
@@ -442,7 +546,7 @@ void MixAgentAudioProcessorEditor::resized()
         px += widths[i] + panelGap;
     }
     for (int i = 0; i < 6; ++i)
-        powerToggles[i + 1]->setBounds(panels[i].getRight() - 26, panels[i].getY() + 7, 18, 16);
+        powerToggles[i + 1]->setBounds(panels[i].getRight() - 30, panels[i].getY() + 2, 24, 24);
 
     const int kw = 54, kh = 78;
     const int row1 = panelY + 34;
@@ -464,10 +568,10 @@ void MixAgentAudioProcessorEditor::resized()
     placeKnobs(compArea.getCentreX(), row3, { compMake }, kw, kh);
 
     {
-        const int blockH = kh + 16 + 20;
+        const int blockH = kh + 16 + 24;
         const int iy = row1 + (contentH - blockH) / 2;
         placeKnobs(panels[2].getCentreX(), iy, { imgW, imgB }, kw, kh);
-        monoToggle->setBounds(panels[2].getCentreX() - 32, iy + kh + 16, 64, 20);
+        monoToggle->setBounds(panels[2].getCentreX() - 32, iy + kh + 16, 64, 24);
     }
 
     placeKnobs(panels[3].getCentreX(), row1, { dlyT, dlyF }, kw, kh);
@@ -484,9 +588,9 @@ void MixAgentAudioProcessorEditor::resized()
     placeKnobs(limArea.getCentreX(), row2, { limA }, kw, kh);
     placeKnobs(limArea.getCentreX(), row3, { limR }, kw, kh);
 
-    powerToggles[7]->setBounds(drumRow.getX() + 10, drumRow.getY() + 6, 18, 16);
-    instProgramCombo.setBounds(drumRow.getX() + 210, drumRow.getY() + 4, 110, 22);
-    instFilterCombo.setBounds(drumRow.getX() + 326, drumRow.getY() + 4, 76, 22);
+    powerToggles[7]->setBounds(drumRow.getX() + 6, drumRow.getY() + 2, 24, 24);
+    instProgramCombo.setBounds(drumRow.getX() + 210, drumRow.getY() + 3, 110, 24);
+    instFilterCombo.setBounds(drumRow.getX() + 326, drumRow.getY() + 3, 76, 24);
     favToggle.setBounds(drumRow.getX() + 408, drumRow.getY() + 2, 58, 26);
     instLevel->setBounds(drumRow.getX() + 474, drumRow.getY() + 2, 54, 64);
     drumLevel->setBounds(drumRow.getX() + 530, drumRow.getY() + 2, 54, 64);
