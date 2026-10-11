@@ -1,0 +1,49 @@
+name: Build and verify MixAgent
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-vst3:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DMIXAGENT_COPY_PLUGIN_AFTER_BUILD=OFF
+      - name: Build plugin, standalone and regression tests
+        run: cmake --build build --config Release --parallel 2 --target MixAgent_VST3 MixAgent_Standalone MixAgentSmokeTest MixAgentDspRegression EditorProbe MixAgentVst3HostSmoke
+      - name: Run audio and editor regression tests
+        run: ctest --test-dir build -C Release --output-on-failure --no-tests=error
+      - name: Verify every deliverable before upload
+        shell: pwsh
+        run: |
+          $required = @(
+            'build/MixAgent_artefacts/Release/VST3/MixAgent.vst3/Contents/x86_64-win/MixAgent.vst3',
+            'build/MixAgent_artefacts/Release/Standalone/MixAgent.exe',
+            'build/mixagent-ui.png'
+          )
+          foreach ($path in $required) {
+            if (!(Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing deliverable: $path" }
+            if ((Get-Item -LiteralPath $path).Length -eq 0) { throw "Empty deliverable: $path" }
+          }
+          foreach ($path in $required[0..1]) {
+            $reader = [System.IO.BinaryReader]::new([System.IO.File]::OpenRead($path))
+            try {
+              if ($reader.ReadUInt16() -ne 0x5A4D) { throw "Invalid Windows PE module: $path" }
+            } finally { $reader.Dispose() }
+          }
+      - name: Upload installable Windows build and editor screenshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: MixAgent-Windows-VST3-Standalone
+          path: |
+            build/MixAgent_artefacts/Release/VST3/MixAgent.vst3
+            build/MixAgent_artefacts/Release/Standalone/MixAgent.exe
+            build/mixagent-ui.png
+          if-no-files-found: error

@@ -20,7 +20,8 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
 
     for (int i = 0; i < proc.getNumPrograms(); ++i)
         presetCombo.addItem(proc.getProgramName(i), i + 1);
-    presetCombo.setSelectedId(1);
+    presetCombo.setSelectedId(proc.getCurrentProgram() + 1, juce::dontSendNotification);
+    presetCombo.setTooltip("Factory presets replace the complete strip. Init restores defaults.");
     presetCombo.setColour(juce::ComboBox::backgroundColourId, juce::Colour(0xff0a0a0d));
     presetCombo.setColour(juce::ComboBox::textColourId, agm::ui::kAccentHot);
     presetCombo.setColour(juce::ComboBox::arrowColourId, agm::ui::kTextDim);
@@ -43,6 +44,8 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
     addAndMakeVisible(spectrum);
     addAndMakeVisible(compMeter);
     addAndMakeVisible(limMeter);
+    inTrim = addKnob("in_gain", "INPUT", " dB", 1);
+    outTrim = addKnob("out_gain", "OUTPUT", " dB", 1);
 
     satModeCombo.addItemList({ "Tube", "Tape", "Soft", "Exciter" }, 1);
     satModeCombo.setSelectedId(1);
@@ -143,7 +146,7 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
     padLabel.setFont(juce::Font(juce::FontOptions(9.0f, juce::Font::bold)));
     padLabel.setColour(juce::Label::textColourId, agm::ui::kTextDim);
     padLabel.setJustificationType(juce::Justification::centredRight);
-    padLabel.setText("16 INSTRUMENTS - MIDI OR MOUSE", juce::dontSendNotification);
+    padLabel.setText("MELODY: CH 1-9 / 11-16   DRUMS: CH 10", juce::dontSendNotification);
     addAndMakeVisible(padLabel);
 
      for (int i = 0; i < (int)agm::InstrumentBank::kCount; ++i)
@@ -153,18 +156,35 @@ MixAgentAudioProcessorEditor::MixAgentAudioProcessorEditor(MixAgentAudioProcesso
     instProgramCombo.setColour(juce::ComboBox::textColourId, agm::ui::kAccentHot);
     instProgramCombo.setColour(juce::ComboBox::arrowColourId, agm::ui::kTextDim);
     instProgramCombo.setColour(juce::ComboBox::outlineColourId, agm::ui::kBorder);
-    instProgramAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-        proc.getAPVTS(), "inst_program", instProgramCombo);
+    // Filtered lists keep stable program IDs. ComboBoxAttachment uses the
+    // visible item index, which would play a different sound in Favorites.
+    instProgramAttachment = std::make_unique<juce::ParameterAttachment>(
+        *proc.getAPVTS().getParameter("inst_program"), [this](float value)
+        {
+            const int program = juce::roundToInt(value);
+            if (instProgramCombo.indexOfItemId(program + 1) < 0)
+                instProgramCombo.addItem(juce::String(agm::InstrumentBank::programName(program)) + " (selected)", program + 1);
+            instProgramCombo.setSelectedId(program + 1, juce::dontSendNotification);
+            favToggle.setToggleState(proc.isFavorite(program), juce::dontSendNotification);
+        }, nullptr);
+    instProgramAttachment->sendInitialUpdate();
     instProgramCombo.onChange = [this]
     {
-        // audition: fire a middle-C pluck so the program is heard instantly
-        proc.uiNoteOn(60, 0.85f);
-        auditionTimerRemaining = 30; // noteOff after ~300ms (timer ticks at 20Hz)
         const int item = instProgramCombo.getSelectedId();
         if (item >= 1 && item <= (int)agm::InstrumentBank::kCount)
+        {
+            instProgramAttachment->setValueAsCompleteGesture((float)(item - 1));
             favToggle.setToggleState(proc.isFavorite(item - 1), juce::dontSendNotification);
+        }
     };
     addAndMakeVisible(instProgramCombo);
+    auditionButton.setTooltip("Preview the selected instrument for 300 ms. Preset changes never inject notes into playback.");
+    auditionButton.onClick = [this]
+    {
+        proc.uiNoteOn(60, 0.85f);
+        auditionTimerRemaining = 6; // 20 Hz timer: 300 ms
+    };
+    addAndMakeVisible(auditionButton);
 
     instFilterCombo.addItem("ALL", 1);
     instFilterCombo.addItem("FAVORITES", 2);
@@ -205,7 +225,8 @@ agm::ui::Knob* MixAgentAudioProcessorEditor::addKnob(const juce::String& id, con
     if (auto* p = dynamic_cast<juce::RangedAudioParameter*>(proc.getAPVTS().getParameter(id)))
     {
         knob->setRange(p->getNormalisableRange().start, p->getNormalisableRange().end, p->getNormalisableRange().interval);
-        knob->setDoubleClickReturnValue(true, p->getDefaultValue());
+        knob->setDoubleClickReturnValue(true, p->convertFrom0to1(p->getDefaultValue()));
+        knob->setTooltip(p->getName(128) + ": double-click to reset; drag to adjust.");
         knobAttachments.add(new juce::AudioProcessorValueTreeState::SliderAttachment(proc.getAPVTS(), id, *knob));
     }
     addAndMakeVisible(knob);
@@ -222,7 +243,7 @@ juce::ToggleButton* MixAgentAudioProcessorEditor::addPower(const juce::String& i
 
 juce::ToggleButton* MixAgentAudioProcessorEditor::addToggle(const juce::String& id, const juce::String& text)
 {
-    auto* t = new agm::ui::PowerToggle(text);
+    auto* t = utilityToggles.add(new agm::ui::PowerToggle(text));
     buttonAttachments.add(new juce::AudioProcessorValueTreeState::ButtonAttachment(proc.getAPVTS(), id, *t));
     addAndMakeVisible(t);
     return t;
@@ -231,7 +252,7 @@ juce::ToggleButton* MixAgentAudioProcessorEditor::addToggle(const juce::String& 
 void MixAgentAudioProcessorEditor::updateProgramList()
 {
     const int filter = instFilterCombo.getSelectedId();
-    const int currentId = instProgramCombo.getSelectedId();
+    const int currentId = proc.getInstrumentProgram() + 1;
     instProgramCombo.clear(juce::dontSendNotification);
 
     for (int i = 0; i < (int)agm::InstrumentBank::kCount; ++i)
@@ -242,7 +263,9 @@ void MixAgentAudioProcessorEditor::updateProgramList()
         if (matchesFav && matchesCat)
             instProgramCombo.addItem(agm::InstrumentBank::programName(i), i + 1);
     }
-    instProgramCombo.setSelectedId(juce::jmax(currentId, 1), juce::dontSendNotification);
+    if (instProgramCombo.indexOfItemId(currentId) < 0)
+        instProgramCombo.addItem(juce::String(agm::InstrumentBank::programName(currentId - 1)) + " (selected)", currentId);
+    instProgramCombo.setSelectedId(currentId, juce::dontSendNotification);
 
     const int item = instProgramCombo.getSelectedId();
     if (item >= 1 && item <= (int)agm::InstrumentBank::kCount)
@@ -276,7 +299,7 @@ void MixAgentAudioProcessorEditor::drawHeader(juce::Graphics& g, juce::Rectangle
     g.setColour(agm::ui::kTextDim);
     g.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
     g.drawText(name, r.getX() + 10, r.getY() + 3, r.getWidth() - 20, 20, juce::Justification::centredLeft);
-    const float w = (float)g.getCurrentFont().getStringWidth(name);
+    const float w = juce::GlyphArrangement::getStringWidth(g.getCurrentFont(), name);
     const float ux = (float)(r.getX() + 10);
     const float uy = (float)(r.getY() + 24);
     g.setGradientFill(juce::ColourGradient(agm::ui::kAccent, ux, uy,
@@ -348,7 +371,7 @@ void MixAgentAudioProcessorEditor::paint(juce::Graphics& g)
         g.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
         g.drawText(name, drumRect.getX() + 34, drumRect.getY() + 3, drumRect.getWidth() - 44, 20,
                    juce::Justification::centredLeft);
-        const float w = (float)g.getCurrentFont().getStringWidth(name);
+        const float w = juce::GlyphArrangement::getStringWidth(g.getCurrentFont(), name);
         const float ux = (float)(drumRect.getX() + 34);
         const float uy = (float)(drumRect.getY() + 24);
         g.setGradientFill(juce::ColourGradient(agm::ui::kAccent, ux, uy,
@@ -371,7 +394,7 @@ void MixAgentAudioProcessorEditor::resized()
     if (!fullyBuilt)
         return;
     auto r = getLocalBounds().reduced(agm::ui::kMargin);
-    topBarRect = r.removeFromTop(44);
+    topBarRect = r.removeFromTop(68);
     r.removeFromTop(10);
     eqSection = r.removeFromTop(230);
     r.removeFromTop(10);
@@ -388,9 +411,11 @@ void MixAgentAudioProcessorEditor::resized()
     t.removeFromRight(16);
     outLabel.setBounds(t.removeFromRight(30).withSizeKeepingCentre(30, 12));
     outMeter.setBounds(t.removeFromRight(14).withSizeKeepingCentre(14, 36));
+    outTrim->setBounds(t.removeFromRight(52).withSizeKeepingCentre(52, 60));
     t.removeFromRight(10);
     inLabel.setBounds(t.removeFromRight(30).withSizeKeepingCentre(30, 12));
     inMeter.setBounds(t.removeFromRight(14).withSizeKeepingCentre(14, 36));
+    inTrim->setBounds(t.removeFromRight(52).withSizeKeepingCentre(52, 60));
 
     powerToggles[0]->setBounds(eqSection.getRight() - 30, eqSection.getY() + 7, 18, 16);
 
@@ -468,12 +493,14 @@ void MixAgentAudioProcessorEditor::resized()
     instFilterCombo.setBounds(drumRow.getX() + 326, drumRow.getY() + 4, 76, 22);
     favToggle.setBounds(drumRow.getX() + 408, drumRow.getY() + 2, 58, 26);
     instLevel->setBounds(drumRow.getX() + 474, drumRow.getY() + 2, 54, 64);
-    padLabel.setBounds(drumRow.getX() + 538, drumRow.getY() + 7, drumRow.getWidth() - 548, 16);
+    auditionButton.setBounds(drumRow.getX() + 538, drumRow.getY() + 4, 86, 22);
+    padLabel.setBounds(drumRow.getX() + 634, drumRow.getY() + 7, drumRow.getWidth() - 644, 16);
     padGrid.setBounds(drumRow.withTrimmedTop(72).reduced(8, 6));
 }
 
 void MixAgentAudioProcessorEditor::timerCallback()
 {
+    presetCombo.setSelectedId(proc.getCurrentProgram() + 1, juce::dontSendNotification);
     inMeter.setLevel(proc.getInLevel(0), proc.getInLevel(1));
     outMeter.setLevel(proc.getOutLevel(0), proc.getOutLevel(1));
     compMeter.setGrDb(proc.getCompGrDb());

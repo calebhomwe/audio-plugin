@@ -152,6 +152,17 @@ int main()
                 finite = false;
         check(finite, "analyzer + EQ curve finite");
 
+        {
+            Harness calibration;
+            calibration.disableAllModules();
+            float measuredRms = 0.0f, measuredPeak = 0.0f;
+            calibration.runSine(44100.0f * 200.0f / 2048.0f, 0.5f, 2.0f, 0.2f, measuredRms, measuredPeak);
+            float spectrum[600];
+            dynamic_cast<MixAgentAudioProcessor&>(*calibration.proc).getAnalyzerSpectrum(spectrum, 600);
+            const float highest = *std::max_element(std::begin(spectrum), std::end(spectrum));
+            check(std::abs(highest + 6.0206f) < 0.3f, "analyzer peak is calibrated to dBFS at high frequencies");
+        }
+
         // regression: oversized block (1024 > prepared 512) with saturation on must not crash/OOB
         h.disableAllModules();
         h.setOn("sat_enabled", true);
@@ -266,6 +277,107 @@ int main()
             temp->setStateInformation(favState.getData(), (int)favState.getSize());
             auto& q = dynamic_cast<MixAgentAudioProcessor&>(*temp);
             check(q.isFavorite(9) && !q.isFavorite(2), "favorites survive state roundtrip");
+        }
+
+        // Loading a preset is deterministic, including Init. Settings from the
+        // previous preset must not leak into the next factory sound.
+        {
+            MixAgentAudioProcessor visited, fresh;
+            visited.setCurrentProgram(4);
+            visited.setCurrentProgram(1);
+            fresh.setCurrentProgram(1);
+            bool same = true;
+            for (int i = 0; i < fresh.getParameters().size(); ++i)
+                same &= std::abs(fresh.getParameters()[i]->getValue()
+                                 - visited.getParameters()[i]->getValue()) < 1e-6f;
+            check(same, "factory preset is independent of previously loaded preset");
+            visited.setCurrentProgram(0);
+            bool defaults = true;
+            for (auto* parameter : visited.getParameters())
+                defaults &= std::abs(parameter->getValue() - parameter->getDefaultValue()) < 1e-6f;
+            check(defaults, "Init restores every parameter default");
+            fresh.setCurrentProgram(5);
+            MemoryBlock saved;
+            fresh.getStateInformation(saved);
+            visited.setStateInformation(saved.getData(), (int)saved.getSize());
+            check(visited.getCurrentProgram() == 5, "state restores factory program identity");
+        }
+
+        // Host MIDI timestamps define the onset, including notes on the last
+        // frame. Low melodic notes cannot be stolen by the percussion bus.
+        {
+            Harness timing;
+            timing.disableAllModules();
+            auto& p = dynamic_cast<MixAgentAudioProcessor&>(*timing.proc);
+            p.setInstrumentProgram(agm::InstrumentBank::Organ);
+            AudioBuffer<float> buffer(2, 1024);
+            buffer.clear();
+            MidiBuffer events;
+            events.addEvent(MidiMessage::noteOn(1, 36, 0.9f), 768);
+            timing.proc->processBlock(buffer, events);
+            check(buffer.getMagnitude(0, 768) < 1e-8f && p.getInstrumentActive(),
+                  "timestamped low MIDI note has no early audio and uses the melodic bank");
+            buffer.clear(); events.clear();
+            timing.proc->processBlock(buffer, events);
+            check(buffer.getMagnitude(0, 1024) > 0.001f, "scheduled note sounds after the reported chain latency");
+            events.addEvent(MidiMessage::allSoundOff(1), 0);
+            buffer.clear(); timing.proc->processBlock(buffer, events);
+            check(!p.getInstrumentActive(), "host all-sound-off clears instrument voices");
+            events.clear(); events.addEvent(MidiMessage::noteOn(10, 36, 0.9f), 512);
+            buffer.clear(); timing.proc->processBlock(buffer, events);
+            check(!p.getInstrumentActive() && buffer.getMagnitude(512, 512) > 0.001f,
+                  "channel 10 percussion renders at its event timestamp");
+
+            auto layout = p.getBusesLayout();
+            layout.inputBuses.set(0, AudioChannelSet::disabled());
+            check(p.isBusesLayoutSupported(layout), "synth accepts stereo output with no input bus");
+            timing.setOn("dly_enabled", true);
+            timing.setRaw("dly_time", 2000.0f);
+            timing.setRaw("dly_feedback", 0.95f);
+            timing.setRaw("dly_mix", 0.5f);
+            check(p.getTailLengthSeconds() > 290.0, "host tail estimate includes long feedback-delay decay");
+        }
+
+        // A full UI queue may drop note-off events. Overflow must silence the
+        // queue instead of leaving notes sounding when the editor is closed.
+        {
+            Harness overflow;
+            overflow.disableAllModules();
+            auto& p = dynamic_cast<MixAgentAudioProcessor&>(*overflow.proc);
+            for (int i = 0; i < 300; ++i) p.uiNoteOn(60, 0.8f);
+            AudioBuffer<float> buffer(2, 512); buffer.clear();
+            MidiBuffer empty;
+            p.processBlock(buffer, empty);
+            check(!p.getInstrumentActive() && buffer.getMagnitude(0, 512) < 1e-8f,
+                  "UI note queue overflow fails safely without hanging voices");
+        }
+
+        // Gain automation must have the same 10 ms response at every host
+        // block size. Previously the block length was applied on every sample.
+        {
+            auto renderGain = [](int blockSize)
+            {
+                Harness gain;
+                gain.disableAllModules();
+                gain.setRaw("in_gain", 12.0f);
+                std::vector<float> output;
+                output.reserve(4096);
+                MidiBuffer empty;
+                for (int offset = 0; offset < 4096; offset += blockSize)
+                {
+                    AudioBuffer<float> buffer(2, blockSize);
+                    for (int ch = 0; ch < 2; ++ch)
+                        for (int i = 0; i < blockSize; ++i) buffer.setSample(ch, i, 0.02f);
+                    gain.proc->processBlock(buffer, empty);
+                    for (int i = 0; i < blockSize; ++i) output.push_back(buffer.getSample(0, i));
+                }
+                return output;
+            };
+            const auto small = renderGain(64), large = renderGain(512);
+            float delta = 0.0f;
+            for (size_t i = 0; i < small.size(); ++i)
+                delta = std::max(delta, std::abs(small[i] - large[i]));
+            check(delta < 1e-5f, "gain smoothing is independent of host block size");
         }
     }
 

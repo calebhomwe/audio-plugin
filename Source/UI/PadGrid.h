@@ -24,8 +24,11 @@ public:
         setWantsKeyboardFocus(false);
     }
 
+    ~PadGrid() override { releaseHeldPads(); }
+
     void setPads(std::vector<Pad> p)
     {
+        releaseHeldPads();
         pads = std::move(p);
         heldPads.resize(pads.size(), false);
         flash.assign(pads.size(), 0.0f);
@@ -55,21 +58,15 @@ public:
         }
     }
 
-    void mouseUp(const juce::MouseEvent& e) override
+    void mouseUp(const juce::MouseEvent&) override
     {
-        const int idx = padAt(e.getPosition());
-        if (idx >= 0)
-        {
-            heldPads[(size_t)idx] = false;
-            fireUp(pads[idx].note);
-            repaint();
-        }
+        releaseHeldPads();
+        repaint();
     }
 
     void mouseExit(const juce::MouseEvent&) override
     {
-        for (int i = 0; i < pads.size(); ++i)
-            if (heldPads[(size_t)i]) { fireUp(pads[i].note); heldPads[(size_t)i] = false; }
+        releaseHeldPads();
         repaint();
     }
 
@@ -171,6 +168,12 @@ public:
     }
 
 private:
+    void releaseHeldPads()
+    {
+        for (size_t i = 0; i < heldPads.size(); ++i)
+            if (heldPads[i]) { fireUp(pads[i].note); heldPads[i] = false; }
+    }
+
     int padAt(juce::Point<int> pos) const
     {
         if (pads.empty() || getWidth() <= 0)

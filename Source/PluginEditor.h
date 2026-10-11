@@ -11,7 +11,7 @@ class MixAgentAudioProcessorEditor : public juce::AudioProcessorEditor, public j
 {
 public:
     explicit MixAgentAudioProcessorEditor(MixAgentAudioProcessor&);
-    ~MixAgentAudioProcessorEditor() override { stopTimer(); }
+    ~MixAgentAudioProcessorEditor() override { stopTimer(); if (auditionTimerRemaining > 0) proc.uiNoteOff(60); }
 
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -46,12 +46,14 @@ private:
     juce::ComboBox instProgramCombo;
     juce::ComboBox instFilterCombo;
     juce::ToggleButton favToggle { "FAV" };
+    juce::TextButton auditionButton { "AUDITION" };
     agm::ui::Knob* instLevel = nullptr;
     juce::ToggleButton* instPower = nullptr;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> instProgramAttachment;
+    std::unique_ptr<juce::ParameterAttachment> instProgramAttachment;
     int auditionTimerRemaining = 0;
 
     juce::OwnedArray<juce::ToggleButton> powerToggles;
+    juce::OwnedArray<juce::ToggleButton> utilityToggles;
     juce::OwnedArray<agm::ui::Knob> knobs;
     juce::OwnedArray<juce::AudioProcessorValueTreeState::SliderAttachment> knobAttachments;
     juce::OwnedArray<juce::AudioProcessorValueTreeState::ButtonAttachment> buttonAttachments;
@@ -64,6 +66,7 @@ private:
     juce::ToggleButton* lpToggle = nullptr;
     juce::ToggleButton* monoToggle = nullptr;
     agm::ui::Knob* hpKnob = nullptr;
+    agm::ui::Knob* inTrim = nullptr, * outTrim = nullptr;
     agm::ui::Knob* lpKnob = nullptr;
     agm::ui::Knob* lsfF = nullptr, * lsfG = nullptr, * hsfF = nullptr, * hsfG = nullptr;
     agm::ui::Knob* p1F = nullptr, * p1G = nullptr, * p1Q = nullptr;

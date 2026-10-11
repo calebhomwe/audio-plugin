@@ -4,6 +4,8 @@
 #include "Biquad.h"
 #include <cmath>
 #include <algorithm>
+#include <array>
+#include <vector>
 
 namespace agm {
 
@@ -14,9 +16,11 @@ public:
     {
         sr = sampleRate > 1.0 ? sampleRate : 44100.0;
         osRate = sr * 4.0;
-        const int maxSamples = juce::jmax(blockSize, 1);
+        // Hosts may deliver a block larger than their prepare hint. Always use
+        // bounded chunks, with every buffer allocated before the audio callback.
+        juce::ignoreUnused(blockSize);
+        const int maxSamples = maxSamplesToProcess;
         oversampler.initProcessing(static_cast<size_t>(maxSamples));
-        osMaxBlock = static_cast<size_t>(maxSamples);
         oversampler.reset();
         tapeLP[0].prepare(osRate);
         tapeLP[1].prepare(osRate);
@@ -24,10 +28,12 @@ public:
         exciterHP[1].prepare(osRate);
         driveGainSmooth.prepare(osRate, 10.0f);
         outGainSmooth.prepare(osRate, 10.0f);
-        mixSmooth.prepare(osRate, 10.0f);
+        mixSmooth.prepare(sr, 10.0f);
         modeMixSmooth.prepare(osRate, 15.0f);
         servoCoef = 1.0f - std::exp(-6.2831853f * 10.0f / (float)osRate);
         workBuffer.setSize(2, maxSamples, false, false, true);
+        dryBuffer.setSize(2, maxSamples, false, false, true);
+        dryDelay.assign((size_t)juce::jmax(1, getLatencySamples()), { 0.0f, 0.0f });
         updateFilters();
         reset();
     }
@@ -45,10 +51,12 @@ public:
         outGainSmooth.snapTo(dbToGain(outputDb));
         mixSmooth.snapTo(mix);
         modeMixSmooth.snapTo(1.0f);
-        bypass.prepare(osRate);
+        bypass.prepare(sr);
+        std::fill(dryDelay.begin(), dryDelay.end(), std::array<float, 2> { 0.0f, 0.0f });
+        dryWritePos = 0;
     }
 
-    int getLatencySamples() const { return oversampler.getLatencyInSamples(); }
+    int getLatencySamples() const { return juce::roundToInt(oversampler.getLatencyInSamples()); }
 
     void process(juce::AudioBuffer<float>& buffer)
     {
@@ -57,38 +65,9 @@ public:
         if (numSamples <= 0 || numChannels <= 0)
             return;
 
-        const bool fullyOff = bypass.fullyOff() || (mix == 0.0f && mixSmooth.settled());
-        if (fullyOff)
-        {
-            if (!wasFullyOff)
-            {
-                oversampler.reset();
-                tapeLP[0].reset();
-                tapeLP[1].reset();
-                exciterHP[0].reset();
-                exciterHP[1].reset();
-                dcServo[0] = 0.0f;
-                dcServo[1] = 0.0f;
-                wasFullyOff = true;
-            }
-            for (int ch = 0; ch < numChannels && ch < 2; ++ch)
-            {
-                float* p = buffer.getWritePointer(ch);
-                for (int i = 0; i < numSamples; ++i)
-                    if (!std::isfinite(p[i]))
-                        p[i] = 0.0f;
-            }
-            return;
-        }
-        wasFullyOff = false;
-
-        if (static_cast<size_t>(numSamples) > osMaxBlock)
-        {
-            oversampler.initProcessing(static_cast<size_t>(numSamples));
-            osMaxBlock = static_cast<size_t>(numSamples);
-        }
-
-        const int chunk = (int)std::min<size_t>((size_t)numSamples, maxSamplesToProcess);
+        // Keep the oversampling path running during bypass and at 0% mix:
+        // its delay must always match the latency reported to the host.
+        const int chunk = std::min(numSamples, maxSamplesToProcess);
         for (int base = 0; base < numSamples; base += chunk)
         {
             const int n = std::min(chunk, numSamples - base);
@@ -98,13 +77,26 @@ public:
 
     void processChunk(juce::AudioBuffer<float>& buffer, int numChannels, int base, int numSamples)
     {
-        if (workBuffer.getNumSamples() < numSamples)
-            workBuffer.setSize(2, numSamples, false, false, true);
-
         juce::FloatVectorOperations::copy(workBuffer.getWritePointer(0), buffer.getReadPointer(0) + base, numSamples);
         juce::FloatVectorOperations::copy(workBuffer.getWritePointer(1),
                                           numChannels > 1 ? buffer.getReadPointer(1) + base : buffer.getReadPointer(0) + base,
                                           numSamples);
+
+        // Delay the unfiltered input by exactly the wet path's reported integer
+        // latency. Bypass and 0% mix then preserve every input sample, including
+        // high frequencies, rather than passing dry audio through FIR filters.
+        const bool delayDry = getLatencySamples() > 0;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                const float input = sanitize(workBuffer.getSample(ch, i));
+                workBuffer.setSample(ch, i, input);
+                dryBuffer.setSample(ch, i, delayDry ? dryDelay[dryWritePos][ch] : input);
+                dryDelay[dryWritePos][ch] = input;
+            }
+            if (++dryWritePos >= dryDelay.size()) dryWritePos = 0;
+        }
 
         juce::dsp::AudioBlock<float> upBlock(workBuffer);
         auto upSub = upBlock.getSubBlock(0, static_cast<size_t>(numSamples));
@@ -122,7 +114,6 @@ public:
         {
             const float pre = driveGainSmooth.next();
             const float post = outGainSmooth.next();
-            const float amount = bypass.next() * mixSmooth.next();
             const float modeMix = modeMixSmooth.next();
 
             float inL = osL[i];
@@ -135,7 +126,6 @@ public:
             if (corrupt)
                 poisoned = true;
 
-            if (amount > 0.0f || corrupt)
             {
                 float wetL = shapeSample(0, mode, inL * pre);
                 float wetR = shapeSample(1, mode, inR * pre);
@@ -149,8 +139,8 @@ public:
                 dcServo[1] += servoCoef * (wetR - dcServo[1]);
                 wetL = (wetL - dcServo[0]) * post;
                 wetR = (wetR - dcServo[1]) * post;
-                osL[i] = inL + amount * (wetL - inL);
-                osR[i] = inR + amount * (wetR - inR);
+                osL[i] = sanitize(wetL);
+                osR[i] = sanitize(wetR);
             }
         }
 
@@ -167,6 +157,17 @@ public:
         {
             auto stereoBlock = downFull.getSubsetChannelBlock(0, 2).getSubBlock(base, numSamples);
             oversampler.processSamplesDown(stereoBlock);
+        }
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float amount = bypass.next() * mixSmooth.next();
+            for (int ch = 0; ch < numChannels && ch < 2; ++ch)
+            {
+                const float dry = dryBuffer.getSample(ch, i);
+                const float wet = sanitize(buffer.getSample(ch, base + i));
+                buffer.setSample(ch, base + i, amount == 0.0f ? dry : dry + amount * (wet - dry));
+            }
         }
     }
 
@@ -248,11 +249,12 @@ private:
         exciterHP[1].setHighPass(2500.0f, 0.7071f);
     }
 
-    juce::dsp::Oversampling<float> oversampler { 2, 2, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, true };
+    juce::dsp::Oversampling<float> oversampler { 2, 2, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, true, true };
     juce::AudioBuffer<float> workBuffer;
-    size_t maxSamplesToProcess = 256;
-    size_t osMaxBlock = 0;
-    bool wasFullyOff = false;
+    juce::AudioBuffer<float> dryBuffer;
+    std::vector<std::array<float, 2>> dryDelay;
+    size_t dryWritePos = 0;
+    static constexpr int maxSamplesToProcess = 256;
     Biquad tapeLP[2];
     Biquad exciterHP[2];
     SmoothBypass bypass;

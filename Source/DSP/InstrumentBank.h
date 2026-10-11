@@ -46,6 +46,7 @@ public:
     {
         sr = sampleRate > 1.0 ? sampleRate : 44100.0;
         preparedBlock = juce::jmax(blockSize, 1);
+        scratch.setSize(2, preparedBlock);
         reset();
     }
 
@@ -66,10 +67,11 @@ public:
     int getProgram() const { return currentProgram; }
 
     void setLevelDb(float db) { levelDb = db; }
-    void setEnabled(bool on) { enabled = on; if (!on) allNotesOff(); }
+    void setEnabled(bool on) { enabled = on; if (!on) for (auto& v : voices) v = Voice {}; }
 
     void noteOn(int note, float velocity)
     {
+        if (!enabled) return;
         const int n = juce::jlimit(0, 127, note);
         const float vel = juce::jlimit(0.0f, 1.0f, velocity);
         Voice* target = nullptr;
@@ -119,13 +121,12 @@ public:
         return false;
     }
 
-    void renderAdd(juce::AudioBuffer<float>& b, int numChannels)
+    void renderAdd(juce::AudioBuffer<float>& b, int numChannels, int startSample = 0, int numSamples = -1)
     {
         if (!enabled) return;
-        const int num = b.getNumSamples();
-        if (num <= 0 || numChannels <= 0) return;
-        if (scratch.getNumSamples() < num)
-            scratch.setSize(juce::jmax(2, numChannels), num, false, false, true);
+        const int count = numSamples < 0 ? b.getNumSamples() - startSample : numSamples;
+        if (count <= 0 || numChannels <= 0 || scratch.getNumSamples() == 0) return;
+        numChannels = juce::jmin(numChannels, b.getNumChannels());
         const float outGain = juce::Decibels::decibelsToGain(levelDb) * 0.5f;
 
         for (auto& v : voices)
@@ -133,12 +134,16 @@ public:
             if (!v.active || v.envStage == EnvStage::Off) continue;
             float* const outL = scratch.getWritePointer(0);
             float* const outR = scratch.getWritePointer(1);
-            renderVoice(v, num, outL, outR);
-            for (int ch = 0; ch < numChannels; ++ch)
+            for (int base = 0; base < count; base += preparedBlock)
             {
-                float* dst = b.getWritePointer(ch);
-                const float* src = (ch & 1) ? outR : outL;
-                for (int i = 0; i < num; ++i) dst[i] += src[i] * outGain;
+                const int num = juce::jmin(preparedBlock, count - base);
+                renderVoice(v, num, outL, outR);
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    float* dst = b.getWritePointer(ch, startSample + base);
+                    const float* src = (ch & 1) ? outR : outL;
+                    for (int i = 0; i < num; ++i) dst[i] += src[i] * outGain;
+                }
             }
         }
     }
@@ -340,6 +345,54 @@ private:
             r.gain = 0.9f;
             r.octaveShift = -1.0f;
             break;
+        case DarkBell:
+            r = makeRecipe(Bell);
+            r.modRatio = 1.5f; r.modAmount = 2.2f;
+            r.filterBase = 0.20f; r.filterEnv = 0.08f; r.filterDecay = 1.0f / 0.45f;
+            r.decayRate = 1.0f / 1.1f; r.releaseRate = 1.0f / 0.65f;
+            r.gain = 0.65f;
+            break;
+        case GlassPluck:
+            r = makeRecipe(Bell);
+            r.modRatio = 2.0f; r.modAmount = 1.3f;
+            r.attackRate = 1.0f / 0.001f;
+            r.decayRate = 1.0f / 0.22f; r.releaseRate = 1.0f / 0.12f;
+            r.filterBase = 0.82f; r.filterEnv = 0.15f; r.filterDecay = 1.0f / 0.18f;
+            r.gain = 0.75f;
+            break;
+        case VoxChoir: // synthesized choir-like pad; no vocal samples
+            r = makeRecipe(Pad);
+            r.nOsc = 3; r.detune = 8.0f;
+            r.attackRate = 1.0f / 0.22f; r.releaseRate = 1.0f / 0.9f;
+            r.filterBase = 0.10f; r.filterEnv = 0.18f; r.filterDecay = 1.0f / 1.2f;
+            r.gain = 0.55f;
+            break;
+        case SoftSoul:
+            r = makeRecipe(EPiano);
+            r.modRatio = 2.0f; r.modAmount = 0.8f;
+            r.attackRate = 1.0f / 0.012f;
+            r.decayRate = 1.0f / 1.4f; r.sustainLevel = 0.35f;
+            r.releaseRate = 1.0f / 0.6f; r.filterBase = 0.24f;
+            r.gain = 0.75f;
+            break;
+        case BounceKeys:
+            r = makeRecipe(Keys);
+            r.detune = 3.0f;
+            r.attackRate = 1.0f / 0.002f;
+            r.decayRate = 1.0f / 0.18f; r.sustainLevel = 0.15f;
+            r.releaseRate = 1.0f / 0.10f;
+            r.filterBase = 0.24f; r.filterEnv = 0.65f; r.filterDecay = 1.0f / 0.12f;
+            r.gain = 0.65f;
+            break;
+        case RageLead:
+            r = makeRecipe(Lead);
+            r.nOsc = 4; r.detune = 18.0f;
+            r.attackRate = 1.0f / 0.002f;
+            r.decayRate = 1.0f / 0.20f; r.sustainLevel = 0.95f;
+            r.releaseRate = 1.0f / 0.18f; r.filterBase = 0.85f;
+            r.gain = 0.48f;
+            break;
+        case kCount: break;
         }
         return r;
     }

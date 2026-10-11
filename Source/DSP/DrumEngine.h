@@ -21,6 +21,7 @@ public:
     {
         sr = sampleRateIn > 1.0 ? sampleRateIn : 44100.0;
         preparedBlock = juce::jmax(blockSize, 1);
+        scratch.setSize(2, preparedBlock);
         reset();
     }
 
@@ -41,6 +42,7 @@ public:
 
     void noteOn(int note, float velocity)
     {
+        if (!enabled) return;
         const int n = juce::jlimit(0, 127, note);
         const float vel = juce::jlimit(0.0f, 1.0f, velocity);
 
@@ -88,27 +90,29 @@ public:
     }
 
     // Mix the drum bus into the host buffer BEFORE the FX chain.
-    void renderAdd(juce::AudioBuffer<float>& b, int numChannels)
+    void renderAdd(juce::AudioBuffer<float>& b, int numChannels, int startSample = 0, int numSamples = -1)
     {
         if (!enabled) return;
-        const int num = b.getNumSamples();
-        if (num <= 0 || numChannels <= 0) return;
-
-        if (scratch.getNumSamples() < num)
-            scratch.setSize(juce::jmax(2, numChannels), num, false, false, true);
+        const int count = numSamples < 0 ? b.getNumSamples() - startSample : numSamples;
+        if (count <= 0 || numChannels <= 0 || scratch.getNumSamples() == 0) return;
+        numChannels = juce::jmin(numChannels, b.getNumChannels());
 
         for (auto& v : voices)
         {
             if (!v.active) continue;
             float* const outL = scratch.getWritePointer(0);
             float* const outR = scratch.getWritePointer(1);
-            renderVoice(v, num, outL, outR);
-            for (int ch = 0; ch < numChannels; ++ch)
+            for (int base = 0; base < count; base += preparedBlock)
             {
-                float* dst = b.getWritePointer(ch);
-                const float* src = (ch & 1) ? outR : outL;
-                for (int i = 0; i < num; ++i)
-                    dst[i] += src[i];
+                const int num = juce::jmin(preparedBlock, count - base);
+                renderVoice(v, num, outL, outR);
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    float* dst = b.getWritePointer(ch, startSample + base);
+                    const float* src = (ch & 1) ? outR : outL;
+                    for (int i = 0; i < num; ++i)
+                        dst[i] += src[i];
+                }
             }
         }
     }
