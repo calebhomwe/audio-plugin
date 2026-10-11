@@ -567,6 +567,15 @@ void MixAgentAudioProcessor::setStateInformation(const void* data, int sizeInByt
                 }
             currentProgram.store((int)program, std::memory_order_relaxed);
             apvts.replaceState(state);
+            // APVTS compares its snapped physical cache when reconnecting a
+            // state. A host can leave AudioParameterBool's actual value at .75
+            // while that cache remains 1, so equal saved endpoints otherwise
+            // skip restoration. Recommit every validated value to the actual
+            // parameter and notify its host controller, preserving the ranges
+            // and IDs while making recall independent of the previous cache.
+            for (const auto& child : state)
+                if (auto* parameter = apvts.getParameter(child.getProperty("id").toString()))
+                    parameter->setValueNotifyingHost(parameter->convertTo0to1((float)child.getProperty("value")));
         }
 }
 

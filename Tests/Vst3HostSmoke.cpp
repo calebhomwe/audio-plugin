@@ -388,6 +388,19 @@ int main(int argc, char** argv)
     processSilence(*plugin, buffer, 20);
     check(isFinite(buffer), "wrapper processes after state restoration");
 
+    setParameter(*plugin, "EQ", 1.0f); setParameter(*plugin, "Img Mono", 0.0f);
+    processSilence(*plugin, buffer, 2);
+    juce::MemoryBlock boolState; plugin->getStateInformation(boolState);
+    auto* eq = findParameter(*plugin, "EQ");
+    auto* mono = findParameter(*plugin, "Img Mono");
+    setParameter(*plugin, "EQ", 0.75f); setParameter(*plugin, "Img Mono", 0.25f);
+    processSilence(*plugin, buffer, 2);
+    check(eq != nullptr && mono != nullptr && eq->getValue() == 0.75f && mono->getValue() == 0.25f,
+          "actual wrapper retains same-side fractional boolean automation before recall");
+    plugin->setStateInformation(boolState.getData(), (int)boolState.getSize());
+    check(eq != nullptr && mono != nullptr && eq->getValue() == 1.0f && mono->getValue() == 0.0f,
+          "actual wrapper state restores exact boolean endpoints without text canonicalization");
+
     bool editorsValid = true;
     for (int cycle = 0; cycle < 2; ++cycle)
     {

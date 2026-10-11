@@ -368,6 +368,24 @@ void extremeGainRecovery()
           "processing recovers to audible finite output after extreme trim overflow");
 }
 
+void fractionalBoolStateRecall()
+{
+    Harness h;
+    h.raw("eq_enabled", 1.0f); h.raw("img_mono", 0.0f);
+    juce::MemoryBlock saved; h.processor.getStateInformation(saved);
+    auto* eq = h.processor.getAPVTS().getParameter("eq_enabled");
+    auto* mono = h.processor.getAPVTS().getParameter("img_mono");
+    // Hosts may write any normalized float, even to a discrete parameter.
+    // JUCE Bool stores the fraction while APVTS caches the snapped endpoint.
+    // Restore must correct the actual parameter even if that cache is unchanged.
+    eq->setValueNotifyingHost(0.75f); mono->setValueNotifyingHost(0.25f);
+    check(eq->getValue() == 0.75f && mono->getValue() == 0.25f,
+          "fractional boolean automation changes live parameter values before recall");
+    h.processor.setStateInformation(saved.getData(), (int)saved.getSize());
+    check(eq->getValue() == 1.0f && mono->getValue() == 0.0f,
+          "state recall restores boolean endpoints after same-side fractional automation");
+}
+
 void malformedStateEnvelope(bool safeBaseline)
 {
     Harness h; h.processor.setCurrentProgram(3); h.dry(); h.raw("inst_enabled", 0.0f);
@@ -530,7 +548,7 @@ int main(int argc, char** argv)
     check(allocations == 1, "callback allocation counter detects a C++ heap allocation");
 #endif
     compressorOracles(); lifecycleAndAutomation(); polyphonySnapshotsAndInvalidState();
-    midiAndUiRecovery(); concurrentControlTraffic(); extremeGainRecovery();
+    midiAndUiRecovery(); concurrentControlTraffic(); extremeGainRecovery(); fractionalBoolStateRecall();
     malformedStateEnvelope(argc > 1 && juce::String(argv[1]) == "--safe-baseline");
     std::printf("Stress checks: %d passed, %d failed\n", passes, failures);
     return failures == 0 ? 0 : 1;
