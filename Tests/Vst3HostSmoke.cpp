@@ -81,20 +81,24 @@ bool perturbEveryParameter(juce::AudioPluginInstance& plugin, const std::vector<
 
 void stressHostedLifecycle(juce::AudioPluginFormatManager& formats, const juce::PluginDescription& description)
 {
+    // VST3 setupProcessing declares a hard maximum, unlike an AudioProcessor's
+    // estimated block-size hint. JUCE's wrapper allocates its mapping scratch
+    // from this maximum, so every submitted block must fit the declared bound.
+    constexpr int maximumBlockSize = 4097;
     bool created = true, finiteAudio = true, recalled = true, mutated = true, stableLatency = true, editorsValid = true;
     int instances = 0, callbacks = 0, stateRecalls = 0, editorCycles = 0;
     for (int cycle = 0; cycle < 24; ++cycle)
     {
         const double rate = cycle % 3 == 0 ? 44100.0 : cycle % 3 == 1 ? 48000.0 : 96000.0;
         juce::String error;
-        auto instance = formats.createPluginInstance(description, rate, 17, error);
+        auto instance = formats.createPluginInstance(description, rate, maximumBlockSize, error);
         if (instance == nullptr) { std::printf("Lifecycle error: %s\n", error.toRawUTF8()); created = false; break; }
         auto layout = instance->getBusesLayout();
         if (layout.inputBuses.size() > 0) layout.inputBuses.set(0, juce::AudioChannelSet::stereo());
         if (layout.outputBuses.size() > 0) layout.outputBuses.set(0, juce::AudioChannelSet::stereo());
         created &= instance->setBusesLayout(layout);
-        instance->setRateAndBufferSizeDetails(rate, 17);
-        instance->prepareToPlay(rate, 17);
+        instance->setRateAndBufferSizeDetails(rate, maximumBlockSize);
+        instance->prepareToPlay(rate, maximumBlockSize);
         ++instances;
         const int initialLatency = instance->getLatencySamples();
         juce::Random random(0x765400 + cycle);
@@ -161,6 +165,9 @@ void stressHostedLifecycle(juce::AudioPluginFormatManager& formats, const juce::
 
 int main(int argc, char** argv)
 {
+    // CI guards capture this process through a pipe. Preserve completed checks
+    // when a wrapper or host crashes, rather than losing buffered diagnostics.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     if (argc != 2)
     {
         std::printf("Usage: MixAgentVst3HostSmoke /path/to/MixAgent.vst3\n");
