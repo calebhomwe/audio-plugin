@@ -55,9 +55,51 @@ void processSilence(juce::AudioPluginInstance& plugin, juce::AudioBuffer<float>&
     }
 }
 
+bool isMidiControllerTransport(const juce::AudioProcessorParameter& parameter)
+{
+    // JUCE adds 2080 non-automatable MIDI CC transport fields to its VST3
+    // controller. They carry performance messages, live outside APVTS, and are
+    // not serialized by the component's state or controller's setComponentState.
+    return !parameter.isAutomatable() && parameter.getName(128).startsWith("MIDI CC ");
+}
+
+bool matchesSavedState(juce::AudioPluginInstance& plugin, const std::vector<float>& saved, int program)
+{
+    bool matches = saved.size() == (size_t)plugin.getParameters().size();
+    if (plugin.getCurrentProgram() != program)
+    {
+        std::printf("State program mismatch: expected=%d actual=%d\n", program, plugin.getCurrentProgram());
+        matches = false;
+    }
+    int mismatches = 0, persistentParameters = 0;
+    for (size_t i = 0; i < saved.size() && i < (size_t)plugin.getParameters().size(); ++i)
+    {
+        auto* parameter = plugin.getParameters()[(int)i];
+        if (isMidiControllerTransport(*parameter)) continue;
+        ++persistentParameters;
+        const float actual = parameter->getValue();
+        if (!(std::abs(saved[i] - actual) < 1.0e-5f))
+        {
+            if (mismatches < 4)
+            {
+                const auto* hosted = dynamic_cast<const juce::HostedAudioProcessorParameter*>(parameter);
+                std::printf("State parameter mismatch: %s id=%s expected=%.9g actual=%.9g automatable=%d\n",
+                            parameter->getName(128).toRawUTF8(), hosted != nullptr ? hosted->getParameterID().toRawUTF8() : "unknown",
+                            saved[i], actual, parameter->isAutomatable() ? 1 : 0);
+            }
+            ++mismatches;
+            matches = false;
+        }
+    }
+    if (mismatches != 0) std::printf("State mismatches: %d of %zu exposed parameters\n", mismatches, saved.size());
+    // 58 MixAgent controls plus JUCE's serialized bypass and factory program.
+    return matches && persistentParameters == 60;
+}
+
 bool perturbEveryParameter(juce::AudioPluginInstance& plugin, const std::vector<float>& saved,
                           juce::AudioBuffer<float>& buffer)
 {
+    const int originalProgram = plugin.getCurrentProgram();
     if (plugin.getNumPrograms() > 1)
     {
         plugin.setCurrentProgram((plugin.getCurrentProgram() + 1) % plugin.getNumPrograms());
@@ -67,7 +109,7 @@ bool perturbEveryParameter(juce::AudioPluginInstance& plugin, const std::vector<
     for (int i = 0; i < plugin.getParameters().size(); ++i)
     {
         auto* parameter = plugin.getParameters()[i];
-        if (parameter->getName(128) == "Program") continue;
+        if (parameter->getName(128) == "Program" || isMidiControllerTransport(*parameter)) continue;
         parameter->setValueNotifyingHost(saved[(size_t)i] < 0.5f ? 1.0f : 0.0f);
         ++expectedChanges;
     }
@@ -75,8 +117,10 @@ bool perturbEveryParameter(juce::AudioPluginInstance& plugin, const std::vector<
     int changes = 0;
     for (int i = 0; i < plugin.getParameters().size(); ++i)
         if (plugin.getParameters()[i]->getName(128) != "Program"
+            && !isMidiControllerTransport(*plugin.getParameters()[i])
             && std::abs(saved[(size_t)i] - plugin.getParameters()[i]->getValue()) > 0.1f) ++changes;
-    return expectedChanges > 0 && changes == expectedChanges;
+    return expectedChanges == 59 && changes == expectedChanges
+        && plugin.getCurrentProgram() != originalProgram;
 }
 
 void stressHostedLifecycle(juce::AudioPluginFormatManager& formats, const juce::PluginDescription& description)
@@ -107,7 +151,7 @@ void stressHostedLifecycle(juce::AudioPluginFormatManager& formats, const juce::
             for (auto* parameter : instance->getParameters())
             {
                 // Program selection replaces other parameters, so exercise it separately.
-                if (parameter->getName(128) == "Program") continue;
+                if (parameter->getName(128) == "Program" || isMidiControllerTransport(*parameter)) continue;
                 float value = random.nextFloat();
                 if (parameter->isDiscrete() && parameter->getNumSteps() > 1)
                     value = (float)juce::roundToInt(value * (parameter->getNumSteps() - 1))
@@ -133,6 +177,14 @@ void stressHostedLifecycle(juce::AudioPluginFormatManager& formats, const juce::
         }
         // Save deliberately distinct values, mutate, and verify real VST3 state restoration.
         setParameter(*instance, "Input", 0.625f); setParameter(*instance, "P1 Gain", 0.7333333f);
+        // The host caches requested normalized automation; continuous JUCE
+        // floats can snap to a 0.01 physical interval inside the processor.
+        // Commit legal values through the public host text API before taking
+        // the strict snapshot, while earlier callbacks still stress arbitrary
+        // normalized automation. No recall is used to construct this fixture.
+        for (auto* parameter : instance->getParameters())
+            if (parameter->getName(128) != "Program" && !isMidiControllerTransport(*parameter))
+                parameter->setValueNotifyingHost(parameter->getValueForText(parameter->getText(parameter->getValue(), 128)));
         juce::AudioBuffer<float> settling(2, 256); processSilence(*instance, settling, 16);
         juce::MemoryBlock state; instance->getStateInformation(state);
         const int savedProgram = instance->getCurrentProgram();
@@ -141,10 +193,7 @@ void stressHostedLifecycle(juce::AudioPluginFormatManager& formats, const juce::
         mutated &= perturbEveryParameter(*instance, saved, settling);
         instance->setStateInformation(state.getData(), (int)state.getSize());
         ++stateRecalls;
-        recalled &= state.getSize() > 0 && saved.size() == (size_t)instance->getParameters().size()
-                 && instance->getCurrentProgram() == savedProgram;
-        for (size_t i = 0; recalled && i < saved.size(); ++i)
-            recalled &= std::abs(saved[i] - instance->getParameters()[(int)i]->getValue()) < 1.0e-5f;
+        recalled &= state.getSize() > 0 && matchesSavedState(*instance, saved, savedProgram);
         if (cycle % 4 == 0)
         {
             ++editorCycles;
@@ -157,8 +206,8 @@ void stressHostedLifecycle(juce::AudioPluginFormatManager& formats, const juce::
     check(created && instances == 24, "24 fresh actual VST3 instances negotiate and prepare their buses");
     check(finiteAudio && callbacks == 480, "480 actual wrapper callbacks survive dense MIDI, automation and 4097-sample blocks");
     check(stableLatency && callbacks == 480, "actual wrapper latency stays fixed throughout parameter automation");
-    check(mutated && stateRecalls == 24, "every hosted non-program parameter changes before each state load");
-    check(recalled && stateRecalls == 24, "24 actual wrapper state recalls restore every exposed parameter");
+    check(mutated && stateRecalls == 24, "all 59 persistent non-program parameters change before each state load");
+    check(recalled && stateRecalls == 24, "24 actual wrapper state recalls restore all 60 persistent fields and the factory program");
     check(editorsValid && editorCycles == 6, "fresh actual wrapper editor lifetimes close before instance destruction");
 }
 }
@@ -198,6 +247,11 @@ int main(int argc, char** argv)
         return 1;
     }
     check(plugin->acceptsMidi(), "wrapper exposes a MIDI input bus");
+    int persistentParameters = 0;
+    for (auto* parameter : plugin->getParameters())
+        if (!isMidiControllerTransport(*parameter)) ++persistentParameters;
+    check(persistentParameters == 60 && plugin->getNumPrograms() == 12,
+          "wrapper exposes all 58 MixAgent controls, serialized bypass and 12 factory programs");
 
     auto layout = plugin->getBusesLayout();
     if (layout.inputBuses.size() > 0) layout.inputBuses.set(0, juce::AudioChannelSet::stereo());
@@ -327,13 +381,10 @@ int main(int argc, char** argv)
     for (auto* parameter : plugin->getParameters()) savedParameters.push_back(parameter->getValue());
     check(state.getSize() > 0, "compiled wrapper serializes nonempty state");
     check(perturbEveryParameter(*plugin, savedParameters, buffer),
-          "every hosted non-program parameter changes before primary state restoration");
+          "all 59 persistent non-program parameters and the program change before primary state restoration");
     plugin->setStateInformation(state.getData(), (int)state.getSize());
-    bool stateMatches = savedParameters.size() == (size_t)plugin->getParameters().size()
-                     && plugin->getCurrentProgram() == savedProgram;
-    for (size_t i = 0; stateMatches && i < savedParameters.size(); ++i)
-        stateMatches &= std::abs(savedParameters[i] - plugin->getParameters()[(int)i]->getValue()) < 1.0e-5f;
-    check(stateMatches, "compiled wrapper state restores every hosted parameter");
+    const bool stateMatches = matchesSavedState(*plugin, savedParameters, savedProgram);
+    check(stateMatches, "compiled wrapper state restores all 60 persistent fields and the factory program");
     processSilence(*plugin, buffer, 20);
     check(isFinite(buffer), "wrapper processes after state restoration");
 
@@ -352,7 +403,7 @@ int main(int argc, char** argv)
     stressHostedLifecycle(formats, *descriptions[0]);
     plugin->releaseResources();
     plugin.reset();
-    check(true, "compiled VST3 instance releases and unloads cleanly");
+    check(true, "compiled VST3 instance survives explicit release and destruction");
     std::printf("Host checks: %d passed, %d failed\n", passes, failures);
     return failures == 0 ? 0 : 1;
 }
