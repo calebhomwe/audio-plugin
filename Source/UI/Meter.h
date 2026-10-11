@@ -169,7 +169,8 @@ private:
     void paintGr(juce::Graphics& g, float dt)
     {
         auto area = getLocalBounds().reduced(3);
-        const auto textRect = area.removeFromBottom(juce::jlimit(0, 12, area.getHeight() / 5));
+        const auto textRect = area.removeFromBottom(juce::jlimit(0, 12, area.getHeight() / 5))
+                                  .withX(1).withWidth(juce::jmax(0, getWidth() - 2));
 
         const float target = grTarget_.load();
         grDisp_ = approach(grDisp_, target, dt, target > grDisp_ ? 20.0f : 140.0f);

@@ -33,6 +33,7 @@ public:
             lastQ[i] = 0.0f;
             updateBand(i);
         }
+        paramsSettled = true;
     }
 
     void reset()
@@ -91,7 +92,7 @@ public:
         hpMix.setEnabled(on);
     }
 
-    void setHpFreq(float hz) { tgtFreq[0] = clampFreq(hz); }
+    void setHpFreq(float hz) { setTarget(tgtFreq[0], clampFreq(hz)); }
 
     void setLpEnabled(bool on)
     {
@@ -99,17 +100,17 @@ public:
         lpMix.setEnabled(on);
     }
 
-    void setLpFreq(float hz) { tgtFreq[6] = clampFreq(hz); }
+    void setLpFreq(float hz) { setTarget(tgtFreq[6], clampFreq(hz)); }
 
-    void setLowShelfFreq(float hz) { tgtFreq[1] = clampFreq(hz); }
-    void setLowShelfGainDb(float db) { tgtGain[1] = clampGain(db); }
+    void setLowShelfFreq(float hz) { setTarget(tgtFreq[1], clampFreq(hz)); }
+    void setLowShelfGainDb(float db) { setTarget(tgtGain[1], clampGain(db)); }
 
-    void setHighShelfFreq(float hz) { tgtFreq[5] = clampFreq(hz); }
-    void setHighShelfGainDb(float db) { tgtGain[5] = clampGain(db); }
+    void setHighShelfFreq(float hz) { setTarget(tgtFreq[5], clampFreq(hz)); }
+    void setHighShelfGainDb(float db) { setTarget(tgtGain[5], clampGain(db)); }
 
-    void setPeakFreq(int i, float hz) { tgtFreq[2 + i] = clampFreq(hz); }
-    void setPeakGainDb(int i, float db) { tgtGain[2 + i] = clampGain(db); }
-    void setPeakQ(int i, float q) { tgtQ[2 + i] = clampQ(q); }
+    void setPeakFreq(int i, float hz) { setTarget(tgtFreq[2 + i], clampFreq(hz)); }
+    void setPeakGainDb(int i, float db) { setTarget(tgtGain[2 + i], clampGain(db)); }
+    void setPeakQ(int i, float q) { setTarget(tgtQ[2 + i], clampQ(q)); }
 
     float getResponseDb(float freq) const
     {
@@ -129,6 +130,10 @@ public:
     }
 
 private:
+    void setTarget(float& target, float value)
+    {
+        if (target != value) { target = value; paramsSettled = false; }
+    }
     static float clampFreq(float f)
     {
         f = sanitize(f, 1000.0f);
@@ -177,6 +182,8 @@ private:
 
     void smoothParams()
     {
+        if (paramsSettled) return;
+        bool settled = true;
         for (int i = 0; i < 7; ++i)
         {
             curFreq[i] += (tgtFreq[i] - curFreq[i]) * smoothCoef;
@@ -193,7 +200,9 @@ private:
                               || std::fabs(curQ[i] - lastQ[i]) > 1e-3f;
             if (changed)
                 updateBand(i);
+            settled &= curFreq[i] == tgtFreq[i] && curGain[i] == tgtGain[i] && curQ[i] == tgtQ[i];
         }
+        paramsSettled = settled;
     }
 
     float processSample(float x, int ch, float mHp, float mLp, float mMaster)
@@ -218,6 +227,7 @@ private:
     SmoothBypass hpMix;
     SmoothBypass lpMix;
     SmoothBypass masterMix;
+    bool paramsSettled = true;
 
     float tgtFreq[7] = {40.0f, 120.0f, 200.0f, 800.0f, 3200.0f, 8000.0f, 18000.0f};
     float tgtGain[7] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};

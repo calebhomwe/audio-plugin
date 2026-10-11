@@ -6,19 +6,22 @@ compressor, stereo imaging, delay, reverb, limiter, synthesized instruments and 
 ## Build on Windows
 
 Install Visual Studio with **Desktop development with C++**, CMake 3.24 or newer,
-and Git. From the repository root:
+Git and Python 3.11 or newer. From the repository root:
 
 ```powershell
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DMIXAGENT_COPY_PLUGIN_AFTER_BUILD=OFF
 cmake --build build --config Release --parallel 2
-ctest --test-dir build -C Release --output-on-failure --no-tests=error
+ctest --test-dir build -C Release --output-on-failure --no-tests=error --repeat until-fail:2
 ```
 
 The VST3 is under `build/MixAgent_artefacts/Release/VST3/MixAgent.vst3`.
 Copy the entire `.vst3` directory to `C:\Program Files\Common Files\VST3`, then
 rescan plugins in your DAW. The standalone executable is under
 `build/MixAgent_artefacts/Release/Standalone`. GitHub Actions builds Windows
-artifacts and runs the same tests on pull requests and pushes to master.
+and Linux artifacts and runs the same tests on pull requests and pushes to master.
+JUCE is pinned to commit `f72bad64d29715216226685810c5196bd0d79d77`.
+See [native builds and release gates](docs/BUILD.md) for Linux, repeatable
+stress/benchmarks and complete package verification.
 
 ## Playing and mixing
 
@@ -48,5 +51,14 @@ The VST3 host test scans the factory, validates stereo dry audio against reporte
 latency, sends timestamped melodic and percussion MIDI through the wrapper,
 checks note release and parameter state recall, and creates/destroys the editor
 before unloading. It runs without attaching a native editor window.
+
+The deterministic stress target adds adversarial callback sizes, automation,
+sample-rate changes, sustained MIDI voices and state/lifecycle checks with
+real audio oracles. Its `--benchmark` mode repeats fixed workloads and reports
+callback distributions and output hashes without timing pass/fail thresholds.
+The actual VST3 host runs twice behind a guard that validates native structures,
+architecture, vendor and class identities, and checks every bundle file's hash
+before and after loading. Packaging tests cover incomplete/corrupt releases and
+native host exit propagation.
 
 Native DAW validation on your target OS remains necessary before a release.

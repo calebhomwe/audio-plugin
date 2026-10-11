@@ -106,10 +106,9 @@ public:
             mk += mkC * (mkT - mk);
 
             float wetGain = dbToGain(mk - gr);
-            if (!(wetGain < 1.0f))
-                wetGain = 1.0f;
-            if (!(wetGain >= 0.0f))
-                wetGain = 0.0f;
+            // Makeup is allowed to increase level. The 24 dB parameter limit
+            // bounds this gain; clamping at unity would silently disable it.
+            wetGain = juce::jlimit(0.0f, 16.0f, sanitize(wetGain));
 
             grMeter += grC * (gr - grMeter);
 
@@ -144,8 +143,10 @@ private:
     void updateCoefs()
     {
         const double fs = sr > 0.0 ? sr : 44100.0;
-        attackCoef = (float)std::exp(-1.0 / (attackMs * 0.001 * fs));
-        releaseCoef = (float)std::exp(-1.0 / (releaseMs * 0.001 * fs));
+        // env += coefficient * (target - env) uses 1 - exp(-1/tau),
+        // whereas exp(-1/tau) itself is the retained-state coefficient.
+        attackCoef = (float)(1.0 - std::exp(-1.0 / (attackMs * 0.001 * fs)));
+        releaseCoef = (float)(1.0 - std::exp(-1.0 / (releaseMs * 0.001 * fs)));
         rmsCoef = (float)(1.0 - std::exp(-1.0 / (8.0 * 0.001 * fs)));
         mixCoef = (float)(1.0 - std::exp(-1.0 / (10.0 * 0.001 * fs)));
         mkCoef = (float)(1.0 - std::exp(-1.0 / (15.0 * 0.001 * fs)));

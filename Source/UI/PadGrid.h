@@ -4,10 +4,10 @@
 
 namespace agm { namespace ui {
 
-// Mouse-triggerable drum pad grid. Each pad fires a MIDI note into the
+// Mouse-triggerable chromatic keyboard. Each key fires a MIDI note into the
 // processor's UI note queue (drained on the audio thread). Pads light up
-// while held (mouse down) and blink when the audio thread is active.
-class PadGrid : public juce::Component
+// while held and retain a short local flash after release.
+class PadGrid : public juce::Component, public juce::SettableTooltipClient
 {
 public:
     struct Pad
@@ -18,8 +18,8 @@ public:
     };
 
     PadGrid(std::function<void(int)> onDown, std::function<void(int)> onUp,
-            std::function<bool()> isAudioActive)
-        : fireDown(std::move(onDown)), fireUp(std::move(onUp)), audioActive(std::move(isAudioActive))
+            std::function<bool()> /*isAudioActive*/)
+        : fireDown(std::move(onDown)), fireUp(std::move(onUp))
     {
         setWantsKeyboardFocus(false);
     }
@@ -64,6 +64,21 @@ public:
         repaint();
     }
 
+    void mouseDrag(const juce::MouseEvent& event) override
+    {
+        const int index = padAt(event.getPosition());
+        if (index >= 0 && heldPads[(size_t)index]) return;
+        releaseHeldPads();
+        if (index >= 0)
+        {
+            heldPads[(size_t)index] = true; flash[(size_t)index] = 1.0f;
+            fireDown(pads[(size_t)index].note);
+        }
+        repaint();
+    }
+
+    void releaseAll() { releaseHeldPads(); repaint(); }
+
     void mouseExit(const juce::MouseEvent&) override
     {
         releaseHeldPads();
@@ -92,9 +107,8 @@ public:
             const juce::Rectangle<int> rct(gap + c * (w + gap), gap + r * (h + gap), w, h);
 
             const bool held = heldPads[(size_t)i];
-            const bool audio = audioActive ? audioActive() : false;
             const float fl = (size_t)i < flash.size() ? flash[(size_t)i] : 0.0f;
-            const bool lit = held || audio || fl > 0.05f;
+            const bool lit = held || fl > 0.05f;
             const juce::Colour col = pads[i].colour;
             const juce::Rectangle<float> rf = rct.toFloat();
             const float cr = 7.0f;
@@ -142,9 +156,8 @@ public:
             }
 
             int note = pads[i].note;
-            if (note >= 24 && note <= 48)
+            if (note >= 0 && note <= 127)
             {
-                const float f = 440.0f * std::pow(2.0f, (float)(note - 69) / 12.0f);
                 g.setColour(lit ? juce::Colours::white : agm::ui::kText);
                 g.setFont(juce::Font(juce::FontOptions(13.0f, juce::Font::bold)));
                 g.drawText(pads[i].label,
@@ -154,7 +167,8 @@ public:
                 {
                     g.setColour(agm::ui::kTextDim);
                     g.setFont(juce::Font(juce::FontOptions(9.0f)));
-                    g.drawText(f >= 100.0f ? juce::String(f, 0) + " Hz" : juce::String(f, 1) + " Hz",
+                    g.drawText(juce::String(pads[i].label) + juce::String(note / 12 - 1)
+                               + "  ·  " + juce::String(note),
                                rf.withTop(rf.getBottom() - 16.0f), juce::Justification::centred);
                 }
             }
@@ -194,7 +208,6 @@ private:
 
     std::function<void(int)> fireDown;
     std::function<void(int)> fireUp;
-    std::function<bool()> audioActive;
     std::vector<Pad> pads;
     std::vector<bool> heldPads;
     std::vector<float> flash;

@@ -40,7 +40,7 @@ bool isFinite(const juce::AudioBuffer<float>& buffer)
 {
     for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
         for (int i = 0; i < buffer.getNumSamples(); ++i)
-            if (!std::isfinite(buffer.getSample(ch, i)))
+            if (!std::isfinite(buffer.getSample(ch, i)) || std::abs(buffer.getSample(ch, i)) > 1.0e8f)
                 return false;
     return true;
 }
@@ -53,6 +53,109 @@ void processSilence(juce::AudioPluginInstance& plugin, juce::AudioBuffer<float>&
         juce::MidiBuffer midi;
         plugin.processBlock(buffer, midi);
     }
+}
+
+bool perturbEveryParameter(juce::AudioPluginInstance& plugin, const std::vector<float>& saved,
+                          juce::AudioBuffer<float>& buffer)
+{
+    if (plugin.getNumPrograms() > 1)
+    {
+        plugin.setCurrentProgram((plugin.getCurrentProgram() + 1) % plugin.getNumPrograms());
+        processSilence(plugin, buffer, 16);
+    }
+    int expectedChanges = 0;
+    for (int i = 0; i < plugin.getParameters().size(); ++i)
+    {
+        auto* parameter = plugin.getParameters()[i];
+        if (parameter->getName(128) == "Program") continue;
+        parameter->setValueNotifyingHost(saved[(size_t)i] < 0.5f ? 1.0f : 0.0f);
+        ++expectedChanges;
+    }
+    processSilence(plugin, buffer, 16);
+    int changes = 0;
+    for (int i = 0; i < plugin.getParameters().size(); ++i)
+        if (plugin.getParameters()[i]->getName(128) != "Program"
+            && std::abs(saved[(size_t)i] - plugin.getParameters()[i]->getValue()) > 0.1f) ++changes;
+    return expectedChanges > 0 && changes == expectedChanges;
+}
+
+void stressHostedLifecycle(juce::AudioPluginFormatManager& formats, const juce::PluginDescription& description)
+{
+    bool created = true, finiteAudio = true, recalled = true, mutated = true, stableLatency = true, editorsValid = true;
+    int instances = 0, callbacks = 0, stateRecalls = 0, editorCycles = 0;
+    for (int cycle = 0; cycle < 24; ++cycle)
+    {
+        const double rate = cycle % 3 == 0 ? 44100.0 : cycle % 3 == 1 ? 48000.0 : 96000.0;
+        juce::String error;
+        auto instance = formats.createPluginInstance(description, rate, 17, error);
+        if (instance == nullptr) { std::printf("Lifecycle error: %s\n", error.toRawUTF8()); created = false; break; }
+        auto layout = instance->getBusesLayout();
+        if (layout.inputBuses.size() > 0) layout.inputBuses.set(0, juce::AudioChannelSet::stereo());
+        if (layout.outputBuses.size() > 0) layout.outputBuses.set(0, juce::AudioChannelSet::stereo());
+        created &= instance->setBusesLayout(layout);
+        instance->setRateAndBufferSizeDetails(rate, 17);
+        instance->prepareToPlay(rate, 17);
+        ++instances;
+        const int initialLatency = instance->getLatencySamples();
+        juce::Random random(0x765400 + cycle);
+        for (int block = 0; block < 20; ++block)
+        {
+            for (auto* parameter : instance->getParameters())
+            {
+                // Program selection replaces other parameters, so exercise it separately.
+                if (parameter->getName(128) == "Program") continue;
+                float value = random.nextFloat();
+                if (parameter->isDiscrete() && parameter->getNumSteps() > 1)
+                    value = (float)juce::roundToInt(value * (parameter->getNumSteps() - 1))
+                          / (float)(parameter->getNumSteps() - 1);
+                parameter->setValueNotifyingHost(value);
+            }
+            const int size = block % 4 == 0 ? 1 : block % 4 == 1 ? 17 : block % 4 == 2 ? 513 : 4097;
+            juce::AudioBuffer<float> buffer(2, size);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < size; ++i) buffer.setSample(ch, i, (random.nextFloat() - 0.5f) * 0.2f);
+            juce::MidiBuffer midi;
+            for (int event = 0; event < 64; ++event)
+            {
+                const int position = event * size / 64;
+                const int channel = event % 16 + 1, note = 24 + (event * 5 + cycle) % 96;
+                midi.addEvent(juce::MidiMessage::noteOn(channel, note, 0.75f), position);
+                midi.addEvent(juce::MidiMessage::noteOff(channel, note), std::min(size - 1, position + 1));
+            }
+            instance->processBlock(buffer, midi);
+            ++callbacks;
+            finiteAudio &= isFinite(buffer);
+            stableLatency &= instance->getLatencySamples() == initialLatency;
+        }
+        // Save deliberately distinct values, mutate, and verify real VST3 state restoration.
+        setParameter(*instance, "Input", 0.625f); setParameter(*instance, "P1 Gain", 0.7333333f);
+        juce::AudioBuffer<float> settling(2, 256); processSilence(*instance, settling, 16);
+        juce::MemoryBlock state; instance->getStateInformation(state);
+        const int savedProgram = instance->getCurrentProgram();
+        std::vector<float> saved;
+        for (auto* parameter : instance->getParameters()) saved.push_back(parameter->getValue());
+        mutated &= perturbEveryParameter(*instance, saved, settling);
+        instance->setStateInformation(state.getData(), (int)state.getSize());
+        ++stateRecalls;
+        recalled &= state.getSize() > 0 && saved.size() == (size_t)instance->getParameters().size()
+                 && instance->getCurrentProgram() == savedProgram;
+        for (size_t i = 0; recalled && i < saved.size(); ++i)
+            recalled &= std::abs(saved[i] - instance->getParameters()[(int)i]->getValue()) < 1.0e-5f;
+        if (cycle % 4 == 0)
+        {
+            ++editorCycles;
+            std::unique_ptr<juce::AudioProcessorEditor> editor(instance->createEditorIfNeeded());
+            editorsValid &= editor != nullptr && editor->getWidth() >= 100 && editor->getHeight() >= 100;
+            editor.reset(); editorsValid &= instance->getActiveEditor() == nullptr;
+        }
+        instance->releaseResources();
+    }
+    check(created && instances == 24, "24 fresh actual VST3 instances negotiate and prepare their buses");
+    check(finiteAudio && callbacks == 480, "480 actual wrapper callbacks survive dense MIDI, automation and 4097-sample blocks");
+    check(stableLatency && callbacks == 480, "actual wrapper latency stays fixed throughout parameter automation");
+    check(mutated && stateRecalls == 24, "every hosted non-program parameter changes before each state load");
+    check(recalled && stateRecalls == 24, "24 actual wrapper state recalls restore every exposed parameter");
+    check(editorsValid && editorCycles == 6, "fresh actual wrapper editor lifetimes close before instance destruction");
 }
 }
 
@@ -115,6 +218,7 @@ int main(int argc, char** argv)
     if (!check(latency > 0 && latency < 4096, "wrapper reports bounded processing latency"))
         return 1;
     std::printf("Reported latency: %d samples\n", latency);
+    check(latency == 205, "actual wrapper preserves the 205-sample latency at 48 kHz");
 
     constexpr int dryBlocks = 24;
     std::vector<float> reference[2];
@@ -174,6 +278,23 @@ int main(int argc, char** argv)
     check(isFinite(buffer) && buffer.getMagnitude(0, blockSize) < 1.0e-6f,
           "real wrapper MIDI note-off releases the sustained voice");
 
+    juce::MidiBuffer layered;
+    layered.addEvent(juce::MidiMessage::noteOn(1, 60, 0.8f), 0);
+    layered.addEvent(juce::MidiMessage::noteOn(2, 60, 0.8f), 0);
+    buffer.clear(); plugin->processBlock(buffer, layered);
+    layered.clear(); layered.addEvent(juce::MidiMessage::noteOff(1, 60), 0);
+    buffer.clear(); plugin->processBlock(buffer, layered); processSilence(*plugin, buffer, 400);
+    check(isFinite(buffer) && buffer.getMagnitude(0, blockSize) > 1.0e-4f,
+          "actual MIDI bus owns equal-pitch melodic notes separately by channel");
+    layered.clear(); layered.addEvent(juce::MidiMessage::allSoundOff(1), 0);
+    buffer.clear(); plugin->processBlock(buffer, layered); processSilence(*plugin, buffer, 8);
+    check(buffer.getMagnitude(0, blockSize) > 1.0e-4f,
+          "actual MIDI channel panic preserves a different channel's held voice");
+    layered.clear(); layered.addEvent(juce::MidiMessage::allSoundOff(2), 0);
+    buffer.clear(); plugin->processBlock(buffer, layered); processSilence(*plugin, buffer, 8);
+    check(buffer.getMagnitude(0, blockSize) < 1.0e-6f,
+          "actual MIDI channel panic clears its remaining held voice");
+
     setParameter(*plugin, "Inst On", 0.0f);
     processSilence(*plugin, buffer, 20);
     juce::MidiBuffer drum;
@@ -192,16 +313,17 @@ int main(int argc, char** argv)
     setParameter(*plugin, "Input", 0.625f);
     setParameter(*plugin, "P1 Gain", 0.7333333f);
     processSilence(*plugin, buffer, 20);
-    std::vector<float> savedParameters;
-    for (auto* parameter : plugin->getParameters()) savedParameters.push_back(parameter->getValue());
     juce::MemoryBlock state;
     plugin->getStateInformation(state);
+    const int savedProgram = plugin->getCurrentProgram();
+    std::vector<float> savedParameters;
+    for (auto* parameter : plugin->getParameters()) savedParameters.push_back(parameter->getValue());
     check(state.getSize() > 0, "compiled wrapper serializes nonempty state");
-    setParameter(*plugin, "Input", 0.125f);
-    setParameter(*plugin, "P1 Gain", 0.1f);
-    processSilence(*plugin, buffer, 20);
+    check(perturbEveryParameter(*plugin, savedParameters, buffer),
+          "every hosted non-program parameter changes before primary state restoration");
     plugin->setStateInformation(state.getData(), (int)state.getSize());
-    bool stateMatches = savedParameters.size() == (size_t)plugin->getParameters().size();
+    bool stateMatches = savedParameters.size() == (size_t)plugin->getParameters().size()
+                     && plugin->getCurrentProgram() == savedProgram;
     for (size_t i = 0; stateMatches && i < savedParameters.size(); ++i)
         stateMatches &= std::abs(savedParameters[i] - plugin->getParameters()[(int)i]->getValue()) < 1.0e-5f;
     check(stateMatches, "compiled wrapper state restores every hosted parameter");
@@ -218,6 +340,9 @@ int main(int argc, char** argv)
         editorsValid &= plugin->getActiveEditor() == nullptr;
     }
     check(editorsValid, "VST3 editor view creates and destroys twice before unload");
+    // Keep the original instance alive while cycling fresh instances: the same
+    // module remains loaded, as it does when a DAW opens several track instances.
+    stressHostedLifecycle(formats, *descriptions[0]);
     plugin->releaseResources();
     plugin.reset();
     check(true, "compiled VST3 instance releases and unloads cleanly");

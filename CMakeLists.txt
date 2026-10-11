@@ -1,14 +1,14 @@
 cmake_minimum_required(VERSION 3.24)
 project(MixAgent VERSION 1.0.0)
 include(CTest)
+find_package(Python3 3.11 REQUIRED COMPONENTS Interpreter)
 option(MIXAGENT_COPY_PLUGIN_AFTER_BUILD "Copy VST3 into the system plugin directory" ON)
 
 include(FetchContent)
 set(JUCE_BUILD_EXTRAS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(juce
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
-    GIT_TAG 8.0.9
-    GIT_SHALLOW TRUE)
+    GIT_TAG f72bad64d29715216226685810c5196bd0d79d77) # JUCE 8.0.9
 FetchContent_MakeAvailable(juce)
 
 add_compile_definitions(JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
@@ -65,9 +65,23 @@ target_link_libraries(MixAgentVst3HostSmoke PRIVATE
     juce::juce_gui_basics)
 add_dependencies(MixAgentVst3HostSmoke MixAgent_VST3)
 get_target_property(MIXAGENT_VST3_BUNDLE MixAgent_VST3 JUCE_PLUGIN_ARTEFACT_FILE)
-add_test(NAME MixAgentVst3HostSmoke
-    COMMAND $<TARGET_FILE:MixAgentVst3HostSmoke> "${MIXAGENT_VST3_BUNDLE}")
-set_tests_properties(MixAgentVst3HostSmoke PROPERTIES TIMEOUT 90)
+if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_test(NAME MixAgentVst3HostSmoke
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/Tools/vst3_gate.py
+            --bundle "${MIXAGENT_VST3_BUNDLE}" --platform $<IF:$<PLATFORM_ID:Windows>,windows-x64,linux-x86_64>
+            --vendor AgentMix --product MixAgent --repeat 2 --timeout 90
+            --report ${CMAKE_CURRENT_BINARY_DIR}/release-evidence/host-ctest-$<CONFIG>.json
+            -- $<TARGET_FILE:MixAgentVst3HostSmoke> "${MIXAGENT_VST3_BUNDLE}")
+else()
+    # The structural release guard currently supports Windows/Linux x86_64.
+    add_test(NAME MixAgentVst3HostSmoke COMMAND $<TARGET_FILE:MixAgentVst3HostSmoke> "${MIXAGENT_VST3_BUNDLE}")
+endif()
+set_tests_properties(MixAgentVst3HostSmoke PROPERTIES TIMEOUT 240)
+
+add_test(NAME MixAgentReleaseGatePython
+    COMMAND ${Python3_EXECUTABLE} -B -m unittest discover -s Tests -p "test_*vst3*.py")
+set_tests_properties(MixAgentReleaseGatePython PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} TIMEOUT 60)
 
 juce_add_console_app(MixAgentSmokeTest)
 juce_generate_juce_header(MixAgentSmokeTest)
@@ -83,6 +97,21 @@ target_link_libraries(MixAgentSmokeTest PRIVATE
     juce::juce_gui_basics
     juce::juce_gui_extra
     juce::juce_audio_devices)
+
+juce_add_console_app(MixAgentStressTest)
+juce_generate_juce_header(MixAgentStressTest)
+target_sources(MixAgentStressTest PRIVATE Tests/StressTest.cpp ${AGM_SOURCES})
+target_include_directories(MixAgentStressTest PRIVATE Source)
+target_compile_features(MixAgentStressTest PRIVATE cxx_std_17)
+target_link_libraries(MixAgentStressTest PRIVATE
+    juce::juce_audio_basics juce::juce_audio_processors juce::juce_audio_utils
+    juce::juce_dsp juce::juce_gui_basics juce::juce_gui_extra juce::juce_audio_devices)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_compile_definitions(MixAgentStressTest PRIVATE AGM_TEST_ALLOCATIONS=1)
+    target_link_options(MixAgentStressTest PRIVATE -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc)
+endif()
+add_test(NAME MixAgentStress COMMAND $<TARGET_FILE:MixAgentStressTest>)
+set_tests_properties(MixAgentStress PROPERTIES TIMEOUT 180 LABELS stress)
 
 juce_add_console_app(EditorProbe)
 juce_generate_juce_header(EditorProbe)

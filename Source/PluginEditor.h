@@ -11,7 +11,7 @@ class MixAgentAudioProcessorEditor : public juce::AudioProcessorEditor, public j
 {
 public:
     explicit MixAgentAudioProcessorEditor(MixAgentAudioProcessor&);
-    ~MixAgentAudioProcessorEditor() override { stopTimer(); if (auditionTimerRemaining > 0) proc.uiNoteOff(60); }
+    ~MixAgentAudioProcessorEditor() override { stopTimer(); if (auditionTimerRemaining > 0) proc.uiNoteOff(auditionNote); }
 
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -26,9 +26,11 @@ private:
     void drawHeader(juce::Graphics& g, juce::Rectangle<int> r, const char* name);
     void updateProgramList();
     void onClickFav();
+    void setKeyboardOctave(int note);
     bool fullyBuilt = false;
 
     MixAgentAudioProcessor& proc;
+    juce::TooltipWindow tooltipWindow { this, 600 };
 
     juce::Label logoLabel, subLabel;
     juce::Label inLabel { {}, "IN" }, outLabel { {}, "OUT" };
@@ -47,10 +49,16 @@ private:
     juce::ComboBox instFilterCombo;
     juce::ToggleButton favToggle { "FAV" };
     juce::TextButton auditionButton { "AUDITION" };
+    juce::TextButton stopNotesButton { "STOP NOTES" };
+    juce::TextButton octaveDown { "-" }, octaveUp { "+" };
+    juce::Label octaveLabel;
     agm::ui::Knob* instLevel = nullptr;
     juce::ToggleButton* instPower = nullptr;
     std::unique_ptr<juce::ParameterAttachment> instProgramAttachment;
     int auditionTimerRemaining = 0;
+    int auditionNote = 60, keyboardBaseNote = 48;
+    std::vector<std::pair<std::atomic<float>*, float>> eqDisplayParameters;
+    double eqDisplayRate = 0.0;
 
     juce::OwnedArray<juce::ToggleButton> powerToggles;
     juce::OwnedArray<juce::ToggleButton> utilityToggles;

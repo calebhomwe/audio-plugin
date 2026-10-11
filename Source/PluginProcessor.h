@@ -48,6 +48,7 @@ public:
     float getCompGrDb() const { return compressor.getGainReductionDb(); }
     float getLimGrDb() const { return limiter.getGainReductionDb(); }
     bool getInstrumentActive() const { return instrumentActive.load(std::memory_order_relaxed); }
+    double getProcessingSampleRate() const { return sampleRate.load(std::memory_order_relaxed); }
     int getInstrumentProgram() const;
     void setInstrumentProgram(int p);
     bool isFavorite(int program) const;
@@ -58,6 +59,7 @@ public:
     // UI-driven triggers (message thread safe; drained on the audio thread)
     void uiNoteOn(int note, float velocity);
     void uiNoteOff(int note);
+    void uiAllSoundOff();
 
 private:
     void handleParameter(const juce::String& id, float rawValue);
@@ -87,7 +89,8 @@ private:
     };
     std::vector<ParameterSnapshot> parameterSnapshots;
 
-    float inGainDb = 0.0f, outGainDb = 0.0f;
+    float inGainTarget = 1.0f, outGainTarget = 1.0f;
+    float gainSmoothingCoef = 0.0f;
     float inGainSmoothed = 1.0f, outGainSmoothed = 1.0f;
     std::atomic<double> sampleRate { 44100.0 };
     std::atomic<int> currentProgram { 0 };

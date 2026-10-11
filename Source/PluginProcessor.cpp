@@ -1,5 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "ValueParsing.h"
+#include <cstring>
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
@@ -131,8 +133,8 @@ void applyEqParameter(agm::EQ& eq, const juce::String& id, float rawValue)
 void MixAgentAudioProcessor::handleParameter(const juce::String& id, float rawValue)
 {
     if (id.startsWith("eq_")) { applyEqParameter(eq, id, rawValue); }
-    else if (id == "in_gain") { inGainDb = rawValue; }
-    else if (id == "out_gain") { outGainDb = rawValue; }
+    else if (id == "in_gain") { inGainTarget = agm::dbToGain(rawValue); }
+    else if (id == "out_gain") { outGainTarget = agm::dbToGain(rawValue); }
     else if (id == "sat_enabled") { saturator.setEnabled(rawValue > 0.5f); }
     else if (id == "sat_mode") { saturator.setMode((int)(rawValue + 0.5f)); }
     else if (id == "sat_drive") { saturator.setDrive(rawValue); }
@@ -222,8 +224,9 @@ void MixAgentAudioProcessor::prepareToPlay(double sr, int blockSize)
         bucketMap[k] = b;
     }
     fftPos = 0;
-    inGainSmoothed = agm::dbToGain(inGainDb);
-    outGainSmoothed = agm::dbToGain(outGainDb);
+    inGainSmoothed = inGainTarget;
+    outGainSmoothed = outGainTarget;
+    gainSmoothingCoef = 1.0f - std::exp(-1.0f / (0.010f * (float)sr));
     setLatencySamples(limiter.getLatencySamples() + saturator.getLatencySamples());
     skipModules.clear();
     skipModules.addTokens(juce::SystemStats::getEnvironmentVariable("AGM_SKIP", ""), " ", "");
@@ -254,6 +257,7 @@ void MixAgentAudioProcessor::enqueueUiNote(int note, float velocity, bool on)
 
 void MixAgentAudioProcessor::uiNoteOn(int note, float velocity) { enqueueUiNote(note, velocity, true); }
 void MixAgentAudioProcessor::uiNoteOff(int note) { enqueueUiNote(note, 0.0f, false); }
+void MixAgentAudioProcessor::uiAllSoundOff() { uiPanic.store(true, std::memory_order_release); }
 
 int MixAgentAudioProcessor::getInstrumentProgram() const
 {
@@ -294,21 +298,21 @@ void MixAgentAudioProcessor::dispatchMidi(const juce::MidiMessage& message)
     const bool drum = message.getChannel() == 10;
     if (message.isAllSoundOff())
     {
-        if (drum) drumEngine.reset(); else instruments.reset();
+        if (drum) drumEngine.reset(); else instruments.allSoundOff(message.getChannel());
     }
     else if (message.isAllNotesOff())
     {
-        if (drum) drumEngine.allNotesOff(); else instruments.allNotesOff();
+        if (drum) drumEngine.allNotesOff(); else instruments.allNotesOff(message.getChannel());
     }
     else if (message.isNoteOn())
     {
         if (drum) drumEngine.noteOn(message.getNoteNumber(), message.getFloatVelocity());
-        else instruments.noteOn(message.getNoteNumber(), message.getFloatVelocity());
+        else instruments.noteOn(message.getNoteNumber(), message.getFloatVelocity(), message.getChannel());
     }
     else if (message.isNoteOff())
     {
         if (drum) drumEngine.noteOff(message.getNoteNumber(), 0.0f);
-        else instruments.noteOff(message.getNoteNumber(), 0.0f);
+        else instruments.noteOff(message.getNoteNumber(), 0.0f, message.getChannel());
     }
 }
 
@@ -369,19 +373,16 @@ void MixAgentAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     instrumentActive.store(instruments.isActive(), std::memory_order_relaxed);
 
     const float rate = (float)sampleRate.load(std::memory_order_relaxed);
-    const float gainCoef = 1.0f - std::exp(-1.0f / (0.010f * rate));
-    const float inTarget = agm::dbToGain(inGainDb);
-    const float outTarget = agm::dbToGain(outGainDb);
 
     float g = inGainSmoothed;
     float inL = 0.0f, inR = 0.0f;
     for (int i = 0; i < numSamples; ++i)
     {
-        g += (inTarget - g) * gainCoef;
+        g += (inGainTarget - g) * gainSmoothingCoef;
         for (int ch = 0; ch < numCh; ++ch)
         {
             float& s = buffer.getWritePointer(ch)[i];
-            s = agm::sanitize(s) * g;
+            s = agm::sanitize(agm::sanitize(s) * g);
             if (ch == 0) inL = std::max(inL, std::abs(s));
             else inR = std::max(inR, std::abs(s));
         }
@@ -403,11 +404,11 @@ void MixAgentAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     g = outGainSmoothed;
     for (int i = 0; i < numSamples; ++i)
     {
-        g += (outTarget - g) * gainCoef;
+        g += (outGainTarget - g) * gainSmoothingCoef;
         for (int ch = 0; ch < numCh; ++ch)
         {
             float& s = buffer.getWritePointer(ch)[i];
-            s *= g;
+            s = agm::sanitize(s * g);
             if (ch == 0) outL = std::max(outL, std::abs(s));
             else outR = std::max(outR, std::abs(s));
         }
@@ -517,12 +518,54 @@ void MixAgentAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
 
 void MixAgentAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
 {
+    if (data == nullptr || sizeInBytes < 9) return;
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    const uint32_t xmlLength = juce::ByteOrder::littleEndianInt(bytes + 4);
+    if (xmlLength == 0 || xmlLength != (uint32_t)sizeInBytes - 9 || bytes[sizeInBytes - 1] != 0
+        || std::memchr(bytes + 8, 0, xmlLength) != nullptr) return;
     if (auto xml = getXmlFromBinary(data, sizeInBytes))
         if (xml->hasTagName(apvts.state.getType()))
         {
-            const auto state = juce::ValueTree::fromXml(*xml);
-            currentProgram.store(juce::jlimit(0, kPresetCount - 1, (int)state.getProperty("factoryProgram", 0)),
-                                 std::memory_order_relaxed);
+            auto state = juce::ValueTree::fromXml(*xml);
+            auto finiteNumber = [](const juce::var& input, double& output)
+            {
+                return agm::parseFiniteDecimal(input.toString(), output);
+            };
+            // Validate the complete state before replacing any live parameters.
+            // NaN trim targets poison smoothing history even after automation
+            // returns to a finite value. Unknown fields remain forward-compatible.
+            juce::StringArray seenParameters;
+            for (const auto& child : state)
+            {
+                const auto id = child.getProperty("id").toString();
+                if (auto* parameter = apvts.getParameter(id))
+                {
+                    double value = 0.0;
+                    if (!child.hasType("PARAM") || seenParameters.contains(id) || !child.hasProperty("value")
+                        || !finiteNumber(child.getProperty("value"), value)) return;
+                    const auto range = parameter->getNormalisableRange();
+                    const double tolerance = 1.0e-6 * (1.0 + std::max(std::abs(range.start), std::abs(range.end)));
+                    if (value < range.start - tolerance || value > range.end + tolerance) return;
+                    seenParameters.add(id);
+                }
+            }
+            double program = 0.0;
+            if (state.hasProperty("factoryProgram")
+                && (!finiteNumber(state.getProperty("factoryProgram"), program)
+                    || program != std::trunc(program) || program < 0 || program >= kPresetCount)) return;
+            // Older sessions predate some controls. Complete them from declared
+            // defaults so recall never inherits trims or instruments from the
+            // patch that happened to be open before loading the session.
+            for (const auto& parameter : parameterSnapshots)
+                if (!seenParameters.contains(parameter.id))
+                {
+                    auto* ranged = apvts.getParameter(parameter.id);
+                    juce::ValueTree missing("PARAM");
+                    missing.setProperty("id", parameter.id, nullptr);
+                    missing.setProperty("value", ranged->convertFrom0to1(ranged->getDefaultValue()), nullptr);
+                    state.addChild(missing, -1, nullptr);
+                }
+            currentProgram.store((int)program, std::memory_order_relaxed);
             apvts.replaceState(state);
         }
 }
