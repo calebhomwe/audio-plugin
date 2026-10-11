@@ -2,6 +2,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "Style.h"
 #include <cmath>
+#include "../ValueParsing.h"
 
 namespace agm {
 namespace ui {
@@ -9,14 +10,72 @@ namespace ui {
 class Knob : public juce::Slider
 {
 public:
+    enum class EntryUnit { Number, Frequency, Percent, Decibels, Milliseconds, Seconds, Ratio };
+
     Knob(const juce::String& label, const juce::String& suffix = {})
         : label_(label), suffix_(suffix)
     {
         setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
         setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
         setDoubleClickReturnValue(true, 0.0);
-        setVelocityBasedMode(true);
+        setVelocityBasedMode(false);
         setMouseDragSensitivity(160);
+        setWantsKeyboardFocus(true);
+        setTitle(label);
+    }
+
+    void setEntryUnit(EntryUnit unit) { entryUnit = unit; }
+    std::function<void(double)> onValueEntered;
+
+    bool commitValueText(const juce::String& text)
+    {
+        double value = 0.0;
+        juce::String suffix;
+        if (!agm::parseFiniteDecimal(text, value, &suffix)) return false;
+        const auto unit = suffix.toLowerCase();
+        if (unit.isNotEmpty())
+        {
+            if (entryUnit == EntryUnit::Frequency && unit == "khz") value *= 1000.0;
+            else if (entryUnit == EntryUnit::Frequency && unit == "hz") {}
+            else if (entryUnit == EntryUnit::Percent && unit == "%")
+                value *= getMaximum() <= 1.0 ? 0.01 : 1.0;
+            else if (entryUnit == EntryUnit::Decibels && unit == "db") {}
+            else if (entryUnit == EntryUnit::Milliseconds && unit == "ms") {}
+            else if (entryUnit == EntryUnit::Seconds && unit == "s") {}
+            else if (entryUnit == EntryUnit::Ratio && unit == ":1") {}
+            else return false;
+        }
+        if (!std::isfinite(value)) return false;
+        value = juce::jlimit(getMinimum(), getMaximum(), value);
+        if (onValueEntered) onValueEntered(value);
+        else setValue(value, juce::sendNotificationSync);
+        return true;
+    }
+
+    void mouseDown(const juce::MouseEvent& event) override
+    {
+        if (event.mods.isPopupMenu() || (event.y >= getHeight() - 24 && event.getNumberOfClicks() == 1))
+        { showValueEntry(); return; }
+        setMouseDragSensitivity(event.mods.isShiftDown() ? 1600 : 160);
+        juce::Slider::mouseDown(event);
+    }
+
+    void mouseDrag(const juce::MouseEvent& event) override
+    {
+        if (!event.mods.isPopupMenu() && event.getMouseDownPosition().y < getHeight() - 24)
+            juce::Slider::mouseDrag(event);
+    }
+
+    void mouseUp(const juce::MouseEvent& event) override
+    {
+        juce::Slider::mouseUp(event);
+        setMouseDragSensitivity(160);
+    }
+
+    bool keyPressed(const juce::KeyPress& key) override
+    {
+        if (key == juce::KeyPress::returnKey) { showValueEntry(); return true; }
+        return juce::Slider::keyPressed(key);
     }
 
     void paint(juce::Graphics& g) override
@@ -114,19 +173,61 @@ public:
         g.setColour(kTextDim);
         drawFitted(g, label_.toUpperCase(),
                    textArea.removeFromTop(textArea.getHeight() * 0.45f),
-                   juce::FontOptions(8.5f));
+                   juce::FontOptions(9.0f));
         g.setColour(kText);
         drawFitted(g, getTextFromValue(getValue()) + suffix_, textArea,
                    juce::FontOptions(10.5f, juce::Font::bold));
     }
 
 private:
+    class ValueEntry : public juce::Component
+    {
+    public:
+        explicit ValueEntry(Knob& knob) : owner(&knob)
+        {
+            setSize(238, 104);
+            caption.setText(knob.label_ + "  ·  " + juce::String(knob.getMinimum())
+                            + " to " + juce::String(knob.getMaximum()), juce::dontSendNotification);
+            caption.setColour(juce::Label::textColourId, kTextDim);
+            caption.setFont(juce::Font(juce::FontOptions(11.0f))); addAndMakeVisible(caption);
+            input.setText(knob.getTextFromValue(knob.getValue()) + knob.suffix_);
+            input.setSelectAllWhenFocused(true); addAndMakeVisible(input);
+            apply.setButtonText("APPLY"); addAndMakeVisible(apply);
+            apply.onClick = [this] { commit(); };
+            input.onReturnKey = [this] { commit(); };
+            input.onEscapeKey = [this] { dismiss(); };
+        }
+        void resized() override
+        {
+            caption.setBounds(8, 4, 222, 20);
+            input.setBounds(12, 30, 214, 26); apply.setBounds(142, 66, 84, 26);
+        }
+        void visibilityChanged() override { if (isShowing()) input.grabKeyboardFocus(); }
+    private:
+        void dismiss() { if (auto* box = findParentComponentOfClass<juce::CallOutBox>()) box->dismiss(); }
+        void commit()
+        {
+            if (owner != nullptr && owner->commitValueText(input.getText())) dismiss();
+            else { caption.setText("Enter a finite number with matching units", juce::dontSendNotification);
+                   caption.setColour(juce::Label::textColourId, kAccentHot); }
+        }
+        juce::Component::SafePointer<Knob> owner;
+        juce::Label caption;
+        juce::TextEditor input;
+        juce::TextButton apply;
+    };
+
+    void showValueEntry()
+    {
+        juce::CallOutBox::launchAsynchronously(std::make_unique<ValueEntry>(*this), getScreenBounds(), nullptr);
+    }
+
     static void drawFitted(juce::Graphics& g, const juce::String& text,
                            juce::Rectangle<float> area, const juce::FontOptions& options)
     {
         juce::Font f(options);
         g.setFont(f);
-        const int w = g.getCurrentFont().getStringWidth(text);
+        const int w = juce::GlyphArrangement::getStringWidthInt(g.getCurrentFont(), text);
         if (w > area.getWidth() && w > 0)
         {
             f.setHorizontalScale(juce::jmax(0.55f, (float)area.getWidth() / (float)w));
@@ -140,6 +241,7 @@ private:
 
     juce::String label_;
     juce::String suffix_;
+    EntryUnit entryUnit = EntryUnit::Number;
 };
 
 } // namespace ui

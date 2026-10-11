@@ -1,4 +1,6 @@
 build/
+__pycache__/
+*.py[cod]
 buildDrum/
 buildP1/
 buildP2/

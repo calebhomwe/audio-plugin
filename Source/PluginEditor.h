@@ -11,7 +11,7 @@ class MixAgentAudioProcessorEditor : public juce::AudioProcessorEditor, public j
 {
 public:
     explicit MixAgentAudioProcessorEditor(MixAgentAudioProcessor&);
-    ~MixAgentAudioProcessorEditor() override { stopTimer(); }
+    ~MixAgentAudioProcessorEditor() override { stopTimer(); if (auditionTimerRemaining > 0) proc.uiNoteOff(auditionNote); }
 
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -26,9 +26,11 @@ private:
     void drawHeader(juce::Graphics& g, juce::Rectangle<int> r, const char* name);
     void updateProgramList();
     void onClickFav();
+    void setKeyboardOctave(int note);
     bool fullyBuilt = false;
 
     MixAgentAudioProcessor& proc;
+    juce::TooltipWindow tooltipWindow { this, 600 };
 
     juce::Label logoLabel, subLabel;
     juce::Label inLabel { {}, "IN" }, outLabel { {}, "OUT" };
@@ -46,12 +48,20 @@ private:
     juce::ComboBox instProgramCombo;
     juce::ComboBox instFilterCombo;
     juce::ToggleButton favToggle { "FAV" };
+    juce::TextButton auditionButton { "AUDITION" };
+    juce::TextButton stopNotesButton { "STOP NOTES" };
+    juce::TextButton octaveDown { "-" }, octaveUp { "+" };
+    juce::Label octaveLabel;
     agm::ui::Knob* instLevel = nullptr;
     juce::ToggleButton* instPower = nullptr;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> instProgramAttachment;
+    std::unique_ptr<juce::ParameterAttachment> instProgramAttachment;
     int auditionTimerRemaining = 0;
+    int auditionNote = 60, keyboardBaseNote = 48;
+    std::vector<std::pair<std::atomic<float>*, float>> eqDisplayParameters;
+    double eqDisplayRate = 0.0;
 
     juce::OwnedArray<juce::ToggleButton> powerToggles;
+    juce::OwnedArray<juce::ToggleButton> utilityToggles;
     juce::OwnedArray<agm::ui::Knob> knobs;
     juce::OwnedArray<juce::AudioProcessorValueTreeState::SliderAttachment> knobAttachments;
     juce::OwnedArray<juce::AudioProcessorValueTreeState::ButtonAttachment> buttonAttachments;
@@ -64,6 +74,7 @@ private:
     juce::ToggleButton* lpToggle = nullptr;
     juce::ToggleButton* monoToggle = nullptr;
     agm::ui::Knob* hpKnob = nullptr;
+    agm::ui::Knob* inTrim = nullptr, * outTrim = nullptr;
     agm::ui::Knob* lpKnob = nullptr;
     agm::ui::Knob* lsfF = nullptr, * lsfG = nullptr, * hsfF = nullptr, * hsfG = nullptr;
     agm::ui::Knob* p1F = nullptr, * p1G = nullptr, * p1Q = nullptr;

@@ -1,5 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "ValueParsing.h"
+#include <cstring>
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
@@ -14,16 +16,13 @@ MixAgentAudioProcessor::MixAgentAudioProcessor()
 {
     for (auto* param : getParameters())
         if (auto* rp = dynamic_cast<juce::RangedAudioParameter*>(param))
-            apvts.addParameterListener(rp->paramID, this);
-    syncModules();
+            parameterSnapshots.push_back({ rp->paramID, apvts.getRawParameterValue(rp->paramID), 0.0f });
+    syncModules(true);
+    for (auto& bin : anaOut)
+        bin.store(-90.0f, std::memory_order_relaxed);
 }
 
-MixAgentAudioProcessor::~MixAgentAudioProcessor()
-{
-    for (auto* param : getParameters())
-        if (auto* rp = dynamic_cast<juce::RangedAudioParameter*>(param))
-            apvts.removeParameterListener(rp->paramID, this);
-}
+MixAgentAudioProcessor::~MixAgentAudioProcessor() = default;
 
 juce::AudioProcessorValueTreeState::ParameterLayout MixAgentAudioProcessor::createParameterLayout()
 {
@@ -106,16 +105,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout MixAgentAudioProcessor::crea
     return layout;
 }
 
-void MixAgentAudioProcessor::parameterChanged(const juce::String& parameterID, float newValue)
+namespace
 {
-    handleParameter(parameterID, newValue);
-}
-
-void MixAgentAudioProcessor::handleParameter(const juce::String& id, float rawValue)
+void applyEqParameter(agm::EQ& eq, const juce::String& id, float rawValue)
 {
-    if (id == "in_gain") { inGainDb = rawValue; }
-    else if (id == "out_gain") { outGainDb = rawValue; }
-    else if (id == "eq_enabled") { eq.setEnabled(rawValue > 0.5f); }
+    if (id == "eq_enabled") { eq.setEnabled(rawValue > 0.5f); }
     else if (id == "eq_hp_enabled") { eq.setHpEnabled(rawValue > 0.5f); }
     else if (id == "eq_hp_freq") { eq.setHpFreq(rawValue); }
     else if (id == "eq_lp_enabled") { eq.setLpEnabled(rawValue > 0.5f); }
@@ -133,6 +127,14 @@ void MixAgentAudioProcessor::handleParameter(const juce::String& id, float rawVa
     else if (id == "eq_p3_freq") { eq.setPeakFreq(2, rawValue); }
     else if (id == "eq_p3_gain") { eq.setPeakGainDb(2, rawValue); }
     else if (id == "eq_p3_q") { eq.setPeakQ(2, rawValue); }
+}
+}
+
+void MixAgentAudioProcessor::handleParameter(const juce::String& id, float rawValue)
+{
+    if (id.startsWith("eq_")) { applyEqParameter(eq, id, rawValue); }
+    else if (id == "in_gain") { inGainTarget = agm::dbToGain(rawValue); }
+    else if (id == "out_gain") { outGainTarget = agm::dbToGain(rawValue); }
     else if (id == "sat_enabled") { saturator.setEnabled(rawValue > 0.5f); }
     else if (id == "sat_mode") { saturator.setMode((int)(rawValue + 0.5f)); }
     else if (id == "sat_drive") { saturator.setDrive(rawValue); }
@@ -173,16 +175,26 @@ void MixAgentAudioProcessor::handleParameter(const juce::String& id, float rawVa
     else if (id == "inst_level") { instruments.setLevelDb(rawValue); }
 }
 
-void MixAgentAudioProcessor::syncModules()
+void MixAgentAudioProcessor::syncModules(bool force)
 {
-    for (auto* param : getParameters())
-        if (auto* rp = dynamic_cast<juce::RangedAudioParameter*>(param))
-            handleParameter(rp->paramID, rp->getNormalisableRange().convertFrom0to1(rp->getValue()));
+    // APVTS values are atomic. All mutable DSP state belongs to the audio thread;
+    // parameter callbacks from the host/message thread must never touch it.
+    for (auto& parameter : parameterSnapshots)
+    {
+        const float value = parameter.value->load(std::memory_order_relaxed);
+        if (force || value != parameter.lastValue)
+        {
+            handleParameter(parameter.id, value);
+            parameter.lastValue = value;
+        }
+    }
 }
 
 void MixAgentAudioProcessor::prepareToPlay(double sr, int blockSize)
 {
-    sampleRate = sr;
+    sr = std::isfinite(sr) && sr > 1.0 ? sr : 44100.0;
+    sampleRate.store(sr, std::memory_order_relaxed);
+    syncModules(true);
     eq.prepare(sr, blockSize);
     saturator.prepare(sr, blockSize);
     compressor.prepare(sr, blockSize);
@@ -196,9 +208,14 @@ void MixAgentAudioProcessor::prepareToPlay(double sr, int blockSize)
     fftIn.assign(kFftSize, 0.0f);
     fftWork.assign(kFftSize * 2, 0.0f);
     bucketMap.resize(kFftSize / 2);
-    bucketSum.assign(kAnaBins, 0.0f);
-    bucketCount.assign(kAnaBins, 0);
+    bucketPeak.assign(kAnaBins, 0.0f);
     anaSmooth.assign(kAnaBins, -90.0f);
+    for (auto& bin : anaOut)
+        bin.store(-90.0f, std::memory_order_relaxed);
+    inPeakL = inPeakR = outPeakL = outPeakR = 0.0f;
+    inLevelL.store(0.0f); inLevelR.store(0.0f);
+    outLevelL.store(0.0f); outLevelR.store(0.0f);
+    instrumentActive.store(false, std::memory_order_relaxed);
     for (int k = 1; k < kFftSize / 2; ++k)
     {
         const float f = (float)k * (float)sr / (float)kFftSize;
@@ -207,25 +224,96 @@ void MixAgentAudioProcessor::prepareToPlay(double sr, int blockSize)
         bucketMap[k] = b;
     }
     fftPos = 0;
-    inGainSmoothed = agm::dbToGain(inGainDb);
-    outGainSmoothed = agm::dbToGain(outGainDb);
+    inGainSmoothed = inGainTarget;
+    outGainSmoothed = outGainTarget;
+    gainSmoothingCoef = 1.0f - std::exp(-1.0f / (0.010f * (float)sr));
     setLatencySamples(limiter.getLatencySamples() + saturator.getLatencySamples());
     skipModules.clear();
     skipModules.addTokens(juce::SystemStats::getEnvironmentVariable("AGM_SKIP", ""), " ", "");
 }
 
-void MixAgentAudioProcessor::releaseResources() {}
-
-void MixAgentAudioProcessor::uiNoteOn(int note, float velocity)
+void MixAgentAudioProcessor::releaseResources()
 {
-    const juce::ScopedLock sl(uiNoteLock);
-    uiNotes.addEvent(juce::MidiMessage::noteOn(1, note, velocity), 0);
+    instruments.reset();
+    drumEngine.reset();
+    eq.reset(); saturator.reset(); compressor.reset(); imager.reset();
+    delay.reset(); reverb.reset(); limiter.reset();
+    instrumentActive.store(false, std::memory_order_relaxed);
 }
 
-void MixAgentAudioProcessor::uiNoteOff(int note)
+void MixAgentAudioProcessor::enqueueUiNote(int note, float velocity, bool on)
 {
-    const juce::ScopedLock sl(uiNoteLock);
-    uiNotes.addEvent(juce::MidiMessage::noteOff(1, note), 0);
+    int start1, size1, start2, size2;
+    uiNoteFifo.prepareToWrite(1, start1, size1, start2, size2);
+    if (size1 + size2 == 0)
+    {
+        uiPanic.store(true, std::memory_order_release);
+        return;
+    }
+    uiNotes[size1 != 0 ? start1 : start2] = {
+        juce::jlimit(0, 127, note), juce::jlimit(0.0f, 1.0f, agm::sanitize(velocity)), on };
+    uiNoteFifo.finishedWrite(1);
+}
+
+void MixAgentAudioProcessor::uiNoteOn(int note, float velocity) { enqueueUiNote(note, velocity, true); }
+void MixAgentAudioProcessor::uiNoteOff(int note) { enqueueUiNote(note, 0.0f, false); }
+void MixAgentAudioProcessor::uiAllSoundOff() { uiPanic.store(true, std::memory_order_release); }
+
+int MixAgentAudioProcessor::getInstrumentProgram() const
+{
+    return juce::roundToInt(apvts.getRawParameterValue("inst_program")->load(std::memory_order_relaxed));
+}
+
+double MixAgentAudioProcessor::getTailLengthSeconds() const
+{
+    auto value = [this](const char* id)
+    {
+        return (double)apvts.getRawParameterValue(id)->load(std::memory_order_relaxed);
+    };
+    // A sounding Pad voice keeps its own release recipe after preset browsing;
+    // allow its full release, then account for the serial delay/reverb tails.
+    double tail = 12.0;
+    if (value("dly_enabled") > 0.5 && value("dly_mix") > 0.0)
+    {
+        const double feedback = value("dly_feedback");
+        const double repeats = feedback > 0.0 ? 1.0 + std::ceil(std::log(0.0005) / std::log(feedback)) : 1.0;
+        tail += value("dly_time") * 0.001 * repeats;
+    }
+    if (value("rvb_enabled") > 0.5 && value("rvb_mix") > 0.0)
+        tail += value("rvb_predelay") * 0.001 + value("rvb_decay") * 1.2;
+    return tail + getLatencySamples() / sampleRate.load(std::memory_order_relaxed);
+}
+
+void MixAgentAudioProcessor::setInstrumentProgram(int program)
+{
+    auto* parameter = apvts.getParameter("inst_program");
+    parameter->setValueNotifyingHost(parameter->convertTo0to1(
+        static_cast<float>(juce::jlimit(0, (int)agm::InstrumentBank::kCount - 1, program))));
+}
+
+void MixAgentAudioProcessor::dispatchMidi(const juce::MidiMessage& message)
+{
+    // General MIDI percussion uses channel 10. Bass and the low preview keys
+    // must remain pitched instruments, regardless of their note number.
+    const bool drum = message.getChannel() == 10;
+    if (message.isAllSoundOff())
+    {
+        if (drum) drumEngine.reset(); else instruments.allSoundOff(message.getChannel());
+    }
+    else if (message.isAllNotesOff())
+    {
+        if (drum) drumEngine.allNotesOff(); else instruments.allNotesOff(message.getChannel());
+    }
+    else if (message.isNoteOn())
+    {
+        if (drum) drumEngine.noteOn(message.getNoteNumber(), message.getFloatVelocity());
+        else instruments.noteOn(message.getNoteNumber(), message.getFloatVelocity(), message.getChannel());
+    }
+    else if (message.isNoteOff())
+    {
+        if (drum) drumEngine.noteOff(message.getNoteNumber(), 0.0f);
+        else instruments.noteOff(message.getNoteNumber(), 0.0f, message.getChannel());
+    }
 }
 
 void MixAgentAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
@@ -236,58 +324,65 @@ void MixAgentAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     if (numSamples == 0 || numCh == 0)
         return;
 
-    // instruments/drums render first: instrument bus feeds the FX chain
-    auto isDrumNote = [](int n) { return n >= 35 && n <= 49; };
+    syncModules();
+    for (int ch = getTotalNumInputChannels(); ch < numCh; ++ch)
+        buffer.clear(ch, 0, numSamples);
+
+    // Drain UI events without locks or MidiBuffer allocations in processBlock.
+    const bool panic = uiPanic.exchange(false, std::memory_order_acquire);
+    int start1, size1, start2, size2;
+    uiNoteFifo.prepareToRead(kUiNoteCapacity, start1, size1, start2, size2);
+    auto drain = [&](int start, int size)
+    {
+        for (int i = 0; i < size; ++i)
+        {
+            const auto& event = uiNotes[start + i];
+            if (panic) continue;
+            if (event.on) instruments.noteOn(event.note, event.velocity);
+            else instruments.noteOff(event.note, 0.0f);
+        }
+    };
+    drain(start1, size1); drain(start2, size2);
+    uiNoteFifo.finishedRead(size1 + size2);
+    if (panic)
+    {
+        instruments.reset();
+        drumEngine.reset();
+    }
+
+    // Render only up to each MIDI timestamp, then apply the event. Notes at the
+    // end of a block cannot sound early, and note-off timing is equally exact.
+    int cursor = 0;
+    auto renderTo = [&](int end)
+    {
+        const int count = end - cursor;
+        instruments.renderAdd(buffer, numCh, cursor, count);
+        drumEngine.renderAdd(buffer, numCh, cursor, count);
+        cursor = end;
+    };
     for (const auto metadata : midiMessages)
     {
-        const auto msg = metadata.getMessage();
-        const int note = msg.getNoteNumber();
-        if (msg.isNoteOn())
-        {
-            if (isDrumNote(note)) drumEngine.noteOn(note, msg.getFloatVelocity());
-            else instruments.noteOn(note, msg.getFloatVelocity());
-        }
-        else if (msg.isNoteOff())
-        {
-            if (isDrumNote(note)) drumEngine.noteOff(note, 0.0f);
-            else instruments.noteOff(note, 0.0f);
-        }
+        // Ignore SysEx before constructing a MidiMessage: long messages own
+        // heap storage, while the note/controller messages we support fit inline.
+        if (metadata.numBytes > 3) continue;
+        const int position = juce::jlimit(cursor, numSamples, metadata.samplePosition);
+        renderTo(position);
+        dispatchMidi(metadata.getMessage());
     }
-    {
-        const juce::ScopedLock sl(uiNoteLock);
-        for (const auto metadata : uiNotes)
-        {
-            const auto msg = metadata.getMessage();
-            const int note = msg.getNoteNumber();
-            if (msg.isNoteOn())
-            {
-                if (isDrumNote(note)) drumEngine.noteOn(note, msg.getFloatVelocity());
-                else instruments.noteOn(note, msg.getFloatVelocity());
-            }
-            else if (msg.isNoteOff())
-            {
-                if (isDrumNote(note)) drumEngine.noteOff(note, 0.0f);
-                else instruments.noteOff(note, 0.0f);
-            }
-        }
-        uiNotes.clear();
-    }
-    instruments.renderAdd(buffer, numCh);
-    drumEngine.renderAdd(buffer, numCh);
+    renderTo(numSamples);
+    instrumentActive.store(instruments.isActive(), std::memory_order_relaxed);
 
-    const float gainCoef = 1.0f - std::exp(-(float)numSamples / (0.010f * (float)sampleRate));
-    const float inTarget = agm::dbToGain(inGainDb);
-    const float outTarget = agm::dbToGain(outGainDb);
+    const float rate = (float)sampleRate.load(std::memory_order_relaxed);
 
     float g = inGainSmoothed;
     float inL = 0.0f, inR = 0.0f;
     for (int i = 0; i < numSamples; ++i)
     {
-        g += (inTarget - g) * gainCoef;
+        g += (inGainTarget - g) * gainSmoothingCoef;
         for (int ch = 0; ch < numCh; ++ch)
         {
             float& s = buffer.getWritePointer(ch)[i];
-            s *= g;
+            s = agm::sanitize(agm::sanitize(s) * g);
             if (ch == 0) inL = std::max(inL, std::abs(s));
             else inR = std::max(inR, std::abs(s));
         }
@@ -309,11 +404,11 @@ void MixAgentAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     g = outGainSmoothed;
     for (int i = 0; i < numSamples; ++i)
     {
-        g += (outTarget - g) * gainCoef;
+        g += (outGainTarget - g) * gainSmoothingCoef;
         for (int ch = 0; ch < numCh; ++ch)
         {
             float& s = buffer.getWritePointer(ch)[i];
-            s *= g;
+            s = agm::sanitize(s * g);
             if (ch == 0) outL = std::max(outL, std::abs(s));
             else outR = std::max(outR, std::abs(s));
         }
@@ -321,7 +416,7 @@ void MixAgentAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce
     outGainSmoothed = g;
     if (numCh == 1) { outR = outL; }
 
-    const float meterCoef = std::exp(-(float)numSamples / (0.3f * (float)sampleRate));
+    const float meterCoef = std::exp(-(float)numSamples / (0.3f * rate));
     inPeakL = std::max(inL, inPeakL * meterCoef);
     inPeakR = std::max(inR, inPeakR * meterCoef);
     outPeakL = std::max(outL, outPeakL * meterCoef);
@@ -356,19 +451,20 @@ void MixAgentAudioProcessor::runFft()
     std::copy(fftIn.begin(), fftIn.end(), fftWork.begin());
     window.multiplyWithWindowingTable(fftWork.data(), kFftSize);
     fft.performRealOnlyForwardTransform(fftWork.data());
-    std::fill(bucketSum.begin(), bucketSum.end(), 0.0f);
-    std::fill(bucketCount.begin(), bucketCount.end(), 0);
+    std::fill(bucketPeak.begin(), bucketPeak.end(), 0.0f);
     for (int k = 1; k < kFftSize / 2; ++k)
     {
         const float re = fftWork[2 * k], im = fftWork[2 * k + 1];
         const float mag = std::sqrt(re * re + im * im);
         const int b = bucketMap[k];
-        bucketSum[b] += mag;
-        bucketCount[b]++;
+        bucketPeak[b] = std::max(bucketPeak[b], mag);
     }
     for (int b = 0; b < kAnaBins; ++b)
     {
-        const float db = 20.0f * std::log10(bucketSum[b] / (float)std::max(1, bucketCount[b]) + 1e-9f);
+        // Hann coherent gain is 0.5: scale a bin-centred full-scale sine to
+        // 0 dBFS instead of reporting an arbitrary FFT-size-dependent level.
+        const float magnitude = 4.0f * bucketPeak[b] / (float)kFftSize;
+        const float db = juce::jlimit(-90.0f, 12.0f, 20.0f * std::log10(magnitude + 1e-9f));
         anaSmooth[b] = anaSmooth[b] * 0.8f + db * 0.2f;
         anaOut[b].store(anaSmooth[b]);
     }
@@ -382,10 +478,17 @@ void MixAgentAudioProcessor::getAnalyzerSpectrum(float* outDb, int n) const
 
 void MixAgentAudioProcessor::getEqCurve(float* outDb, int n) const
 {
+    // The editor reads a private filter snapshot, never the live audio-thread
+    // coefficients. Display the requested response while DSP smoothing catches up.
+    agm::EQ displayEq;
+    for (const auto& parameter : parameterSnapshots)
+        if (parameter.id.startsWith("eq_"))
+            applyEqParameter(displayEq, parameter.id, parameter.value->load(std::memory_order_relaxed));
+    displayEq.prepare(sampleRate.load(std::memory_order_relaxed), 1);
     for (int i = 0; i < n; ++i)
     {
         const float f = 20.0f * std::pow(1000.0f, (float)i / (float)std::max(1, n - 1));
-        outDb[i] = eq.getResponseDb(f);
+        outDb[i] = displayEq.getResponseDb(f);
     }
 }
 
@@ -399,7 +502,8 @@ juce::AudioProcessorEditor* MixAgentAudioProcessor::createEditor()
 
 bool MixAgentAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
 {
-    if (layouts.getMainInputChannels() != layouts.getMainOutputChannels())
+    if (layouts.getMainInputChannels() != 0
+        && layouts.getMainInputChannels() != layouts.getMainOutputChannels())
         return false;
     return layouts.getMainOutputChannels() == 1 || layouts.getMainOutputChannels() == 2;
 }
@@ -407,15 +511,72 @@ bool MixAgentAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) 
 void MixAgentAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
     auto state = apvts.copyState();
+    state.setProperty("factoryProgram", getCurrentProgram(), nullptr);
     if (auto xml = state.createXml())
         copyXmlToBinary(*xml, destData);
 }
 
 void MixAgentAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
 {
+    if (data == nullptr || sizeInBytes < 9) return;
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    const uint32_t xmlLength = juce::ByteOrder::littleEndianInt(bytes + 4);
+    if (xmlLength == 0 || xmlLength != (uint32_t)sizeInBytes - 9 || bytes[sizeInBytes - 1] != 0
+        || std::memchr(bytes + 8, 0, xmlLength) != nullptr) return;
     if (auto xml = getXmlFromBinary(data, sizeInBytes))
         if (xml->hasTagName(apvts.state.getType()))
-            apvts.replaceState(juce::ValueTree::fromXml(*xml));
+        {
+            auto state = juce::ValueTree::fromXml(*xml);
+            auto finiteNumber = [](const juce::var& input, double& output)
+            {
+                return agm::parseFiniteDecimal(input.toString(), output);
+            };
+            // Validate the complete state before replacing any live parameters.
+            // NaN trim targets poison smoothing history even after automation
+            // returns to a finite value. Unknown fields remain forward-compatible.
+            juce::StringArray seenParameters;
+            for (const auto& child : state)
+            {
+                const auto id = child.getProperty("id").toString();
+                if (auto* parameter = apvts.getParameter(id))
+                {
+                    double value = 0.0;
+                    if (!child.hasType("PARAM") || seenParameters.contains(id) || !child.hasProperty("value")
+                        || !finiteNumber(child.getProperty("value"), value)) return;
+                    const auto range = parameter->getNormalisableRange();
+                    const double tolerance = 1.0e-6 * (1.0 + std::max(std::abs(range.start), std::abs(range.end)));
+                    if (value < range.start - tolerance || value > range.end + tolerance) return;
+                    seenParameters.add(id);
+                }
+            }
+            double program = 0.0;
+            if (state.hasProperty("factoryProgram")
+                && (!finiteNumber(state.getProperty("factoryProgram"), program)
+                    || program != std::trunc(program) || program < 0 || program >= kPresetCount)) return;
+            // Older sessions predate some controls. Complete them from declared
+            // defaults so recall never inherits trims or instruments from the
+            // patch that happened to be open before loading the session.
+            for (const auto& parameter : parameterSnapshots)
+                if (!seenParameters.contains(parameter.id))
+                {
+                    auto* ranged = apvts.getParameter(parameter.id);
+                    juce::ValueTree missing("PARAM");
+                    missing.setProperty("id", parameter.id, nullptr);
+                    missing.setProperty("value", ranged->convertFrom0to1(ranged->getDefaultValue()), nullptr);
+                    state.addChild(missing, -1, nullptr);
+                }
+            currentProgram.store((int)program, std::memory_order_relaxed);
+            apvts.replaceState(state);
+            // APVTS compares its snapped physical cache when reconnecting a
+            // state. A host can leave AudioParameterBool's actual value at .75
+            // while that cache remains 1, so equal saved endpoints otherwise
+            // skip restoration. Recommit every validated value to the actual
+            // parameter and notify its host controller, preserving the ranges
+            // and IDs while making recall independent of the previous cache.
+            for (const auto& child : state)
+                if (auto* parameter = apvts.getParameter(child.getProperty("id").toString()))
+                    parameter->setValueNotifyingHost(parameter->convertTo0to1((float)child.getProperty("value")));
+        }
 }
 
 namespace
@@ -485,13 +646,18 @@ int MixAgentAudioProcessor::getFavoriteCount() const
 
 void MixAgentAudioProcessor::setCurrentProgram(int index)
 {
-    currentProgram = juce::jlimit(0, kPresetCount - 1, index);
+    const int selectedProgram = juce::jlimit(0, kPresetCount - 1, index);
+    currentProgram.store(selectedProgram, std::memory_order_relaxed);
+    // Every factory preset starts from the same baseline. Otherwise loading
+    // Clean Master after Wide & Spacey accidentally retains the delay/reverb.
+    for (auto* parameter : getParameters())
+        parameter->setValueNotifyingHost(parameter->getDefaultValue());
     auto setRaw = [&](const juce::String& id, float raw)
     {
         if (auto* p = dynamic_cast<juce::RangedAudioParameter*>(apvts.getParameter(id)))
             p->setValueNotifyingHost(p->getNormalisableRange().convertTo0to1(raw));
     };
-    switch (currentProgram)
+    switch (selectedProgram)
     {
     case 0: break;
     case 1:

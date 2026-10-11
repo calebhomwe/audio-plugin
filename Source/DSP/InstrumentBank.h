@@ -46,6 +46,7 @@ public:
     {
         sr = sampleRate > 1.0 ? sampleRate : 44100.0;
         preparedBlock = juce::jmax(blockSize, 1);
+        scratch.setSize(2, preparedBlock);
         reset();
     }
 
@@ -65,21 +66,24 @@ public:
 
     int getProgram() const { return currentProgram; }
 
-    void setLevelDb(float db) { levelDb = db; }
-    void setEnabled(bool on) { enabled = on; if (!on) allNotesOff(); }
+    void setLevelDb(float db) { outGain = juce::Decibels::decibelsToGain(db) * 0.5f; }
+    void setEnabled(bool on) { enabled = on; if (!on) for (auto& v : voices) v = Voice {}; }
 
-    void noteOn(int note, float velocity)
+    void noteOn(int note, float velocity, int channel = 1)
     {
+        if (!enabled) return;
         const int n = juce::jlimit(0, 127, note);
         const float vel = juce::jlimit(0.0f, 1.0f, velocity);
         Voice* target = nullptr;
         for (auto& v : voices)
-            if (v.active && v.note == n && v.envStage != EnvStage::Release && v.envStage != EnvStage::Off)
+            if (v.active && v.note == n && v.channel == channel
+                && v.envStage != EnvStage::Release && v.envStage != EnvStage::Off)
             { target = &v; break; }
         Voice& v = (target != nullptr) ? *target : voiceFor();
         v = Voice {};
         v.active = true;
         v.note = n;
+        v.channel = channel;
         v.vel = vel;
         v.age = ++voiceAge;
         v.freq = noteToFreq(n);
@@ -90,27 +94,54 @@ public:
         v.recipe = recipe;
         for (int i = 0; i < recipe.nOsc && i < 4; ++i)
             v.detune[i] = (float)((rand01() - 0.5) * 2.0) * recipe.detune;
+        // The note owns its immutable recipe and derived oscillator/envelope
+        // constants. Dense MIDI partitions must not recompute powers/exp for
+        // every small render range, or adopt a newly selected recipe.
+        v.fundamental = v.freq * std::pow(2.0f, v.recipe.octaveShift);
+        v.phaseInc = v.fundamental / (float)sr;
+        v.modInc = v.phaseInc * v.recipe.modRatio;
+        v.attackCoef = ratePerSecToCoef(v.recipe.attackRate, sr);
+        v.decayCoef = ratePerSecToCoef(v.recipe.decayRate, sr);
+        v.releaseCoef = ratePerSecToCoef(v.recipe.releaseRate, sr);
+        v.filterEnvCoef = ratePerSecToCoef(v.recipe.filterDecay, sr);
+        v.velocityGain = v.vel * (0.55f + 0.45f * v.vel);
+        if (v.recipe.saw)
+            for (int i = 0; i < v.recipe.nOsc; ++i)
+            {
+                const float detuneRatio = std::exp2f(v.detune[i] / 1200.0f);
+                v.incL[i] = v.phaseInc * detuneRatio;
+                v.incR[i] = v.phaseInc / detuneRatio;
+            }
     }
 
-    void noteOff(int note, float /*velocity*/)
+    void noteOff(int note, float /*velocity*/, int channel = 1)
     {
         const int n = juce::jlimit(0, 127, note);
         for (auto& v : voices)
-            if (v.active && v.note == n && v.envStage != EnvStage::Release && v.envStage != EnvStage::Off)
+            if (v.active && v.note == n && v.channel == channel
+                && v.envStage != EnvStage::Release && v.envStage != EnvStage::Off)
             {
                 v.envStage = EnvStage::Release;
                 v.envRate = v.recipe.releaseRate;
+                v.releaseCoef = ratePerSecToCoef(v.envRate, sr);
             }
     }
 
-    void allNotesOff()
+    void allNotesOff(int channel = 0)
     {
         for (auto& v : voices)
-            if (v.active && v.envStage != EnvStage::Off)
+            if (v.active && v.envStage != EnvStage::Off && (channel == 0 || v.channel == channel))
             {
                 v.envStage = EnvStage::Release;
                 v.envRate = v.recipe.releaseRate * 4.0f;
+                v.releaseCoef = ratePerSecToCoef(v.envRate, sr);
             }
+    }
+
+    void allSoundOff(int channel = 0)
+    {
+        for (auto& v : voices)
+            if (channel == 0 || v.channel == channel) v = Voice {};
     }
 
     bool isActive() const
@@ -119,26 +150,29 @@ public:
         return false;
     }
 
-    void renderAdd(juce::AudioBuffer<float>& b, int numChannels)
+    void renderAdd(juce::AudioBuffer<float>& b, int numChannels, int startSample = 0, int numSamples = -1)
     {
         if (!enabled) return;
-        const int num = b.getNumSamples();
-        if (num <= 0 || numChannels <= 0) return;
-        if (scratch.getNumSamples() < num)
-            scratch.setSize(juce::jmax(2, numChannels), num, false, false, true);
-        const float outGain = juce::Decibels::decibelsToGain(levelDb) * 0.5f;
+        const int count = numSamples < 0 ? b.getNumSamples() - startSample : numSamples;
+        if (count <= 0 || numChannels <= 0 || scratch.getNumSamples() == 0) return;
+        numChannels = juce::jmin(numChannels, b.getNumChannels());
 
         for (auto& v : voices)
         {
             if (!v.active || v.envStage == EnvStage::Off) continue;
             float* const outL = scratch.getWritePointer(0);
             float* const outR = scratch.getWritePointer(1);
-            renderVoice(v, num, outL, outR);
-            for (int ch = 0; ch < numChannels; ++ch)
+            for (int base = 0; base < count; base += preparedBlock)
             {
-                float* dst = b.getWritePointer(ch);
-                const float* src = (ch & 1) ? outR : outL;
-                for (int i = 0; i < num; ++i) dst[i] += src[i] * outGain;
+                const int num = juce::jmin(preparedBlock, count - base);
+                renderVoice(v, num, outL, outR);
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    float* dst = b.getWritePointer(ch, startSample + base);
+                    const float* src = (ch & 1) ? outR : outL;
+                    for (int i = 0; i < num; ++i) dst[i] += src[i] * outGain;
+                }
+                if (!v.active) break;
             }
         }
     }
@@ -170,6 +204,7 @@ private:
     {
         bool active = false;
         int note = 60;
+        int channel = 1;
         float vel = 1.0f;
         float freq = 440.0f;
         std::array<float, 4> oscPhase {};
@@ -185,6 +220,10 @@ private:
         float cutLast = -1.0f;
         float filterCoef = 0.0f;
         Recipe recipe {};
+        float fundamental = 0.0f, phaseInc = 0.0f, modInc = 0.0f;
+        float attackCoef = 0.0f, decayCoef = 0.0f, releaseCoef = 0.0f, filterEnvCoef = 0.0f;
+        float velocityGain = 1.0f;
+        std::array<float, 4> incL {}, incR {};
         uint32_t age = 0;
     };
 
@@ -195,7 +234,7 @@ private:
     int currentProgram = (int)Pluck;
     double sr = 44100.0;
     int preparedBlock = 1;
-    float levelDb = 0.0f;
+    float outGain = 0.5f;
     bool enabled = true;
     juce::AudioBuffer<float> scratch;
     uint32_t randState = 0x1234u;
@@ -340,6 +379,54 @@ private:
             r.gain = 0.9f;
             r.octaveShift = -1.0f;
             break;
+        case DarkBell:
+            r = makeRecipe(Bell);
+            r.modRatio = 1.5f; r.modAmount = 2.2f;
+            r.filterBase = 0.20f; r.filterEnv = 0.08f; r.filterDecay = 1.0f / 0.45f;
+            r.decayRate = 1.0f / 1.1f; r.releaseRate = 1.0f / 0.65f;
+            r.gain = 0.65f;
+            break;
+        case GlassPluck:
+            r = makeRecipe(Bell);
+            r.modRatio = 2.0f; r.modAmount = 1.3f;
+            r.attackRate = 1.0f / 0.001f;
+            r.decayRate = 1.0f / 0.22f; r.releaseRate = 1.0f / 0.12f;
+            r.filterBase = 0.82f; r.filterEnv = 0.15f; r.filterDecay = 1.0f / 0.18f;
+            r.gain = 0.75f;
+            break;
+        case VoxChoir: // synthesized choir-like pad; no vocal samples
+            r = makeRecipe(Pad);
+            r.nOsc = 3; r.detune = 8.0f;
+            r.attackRate = 1.0f / 0.22f; r.releaseRate = 1.0f / 0.9f;
+            r.filterBase = 0.10f; r.filterEnv = 0.18f; r.filterDecay = 1.0f / 1.2f;
+            r.gain = 0.55f;
+            break;
+        case SoftSoul:
+            r = makeRecipe(EPiano);
+            r.modRatio = 2.0f; r.modAmount = 0.8f;
+            r.attackRate = 1.0f / 0.012f;
+            r.decayRate = 1.0f / 1.4f; r.sustainLevel = 0.35f;
+            r.releaseRate = 1.0f / 0.6f; r.filterBase = 0.24f;
+            r.gain = 0.75f;
+            break;
+        case BounceKeys:
+            r = makeRecipe(Keys);
+            r.detune = 3.0f;
+            r.attackRate = 1.0f / 0.002f;
+            r.decayRate = 1.0f / 0.18f; r.sustainLevel = 0.15f;
+            r.releaseRate = 1.0f / 0.10f;
+            r.filterBase = 0.24f; r.filterEnv = 0.65f; r.filterDecay = 1.0f / 0.12f;
+            r.gain = 0.65f;
+            break;
+        case RageLead:
+            r = makeRecipe(Lead);
+            r.nOsc = 4; r.detune = 18.0f;
+            r.attackRate = 1.0f / 0.002f;
+            r.decayRate = 1.0f / 0.20f; r.sustainLevel = 0.95f;
+            r.releaseRate = 1.0f / 0.18f; r.filterBase = 0.85f;
+            r.gain = 0.48f;
+            break;
+        case kCount: break;
         }
         return r;
     }
@@ -347,26 +434,13 @@ private:
     void renderVoice(Voice& v, int num, float* outL, float* outR)
     {
         const Recipe& r = v.recipe;
-        const float fundamental = v.freq * std::pow(2.0f, r.octaveShift);
-        const float phaseInc = fundamental / (float)sr;
-        const float modInc = phaseInc * r.modRatio;
-        const float aCoef = ratePerSecToCoef(r.attackRate, sr);
-        const float dCoef = ratePerSecToCoef(r.decayRate, sr);
-        const float relCoef = ratePerSecToCoef(v.envRate > 0.0f ? v.envRate : r.releaseRate, sr);
-        const float fEnvCoef = ratePerSecToCoef(r.filterDecay, sr);
+        const float fundamental = v.fundamental;
+        const float phaseInc = v.phaseInc, modInc = v.modInc;
+        const float aCoef = v.attackCoef, dCoef = v.decayCoef, relCoef = v.releaseCoef;
+        const float fEnvCoef = v.filterEnvCoef;
         const float nyq = (float)sr * 0.5f;
         const float filterMax = std::min(1.0f, r.filterBase);
-        const float velEff = v.vel * (0.55f + 0.45f * v.vel);
-
-        float incL[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-        float incR[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-        if (r.saw)
-            for (int o = 0; o < r.nOsc; ++o)
-            {
-                const float d = std::exp2f(v.detune[o] / 1200.0f);
-                incL[o] = phaseInc * d;
-                incR[o] = phaseInc / d;
-            }
+        const float velEff = v.velocityGain;
 
         for (int i = 0; i < num; ++i)
         {
@@ -403,6 +477,12 @@ private:
                 break;
             default: break;
             }
+            if (!v.active)
+            {
+                std::fill(outL + i, outL + num, 0.0f);
+                std::fill(outR + i, outR + num, 0.0f);
+                break;
+            }
 
             // filter envelope (opens on note, closes toward base)
             if (r.filterEnv > 0.0f)
@@ -433,9 +513,9 @@ private:
                 const float inv = 1.0f / (float)r.nOsc;
                 for (int o = 0; o < r.nOsc; ++o)
                 {
-                    v.oscPhase[o] += incL[o];
+                    v.oscPhase[o] += v.incL[o];
                     if (v.oscPhase[o] >= 1.0f) v.oscPhase[o] -= 1.0f;
-                    v.oscPhaseR[o] += incR[o];
+                    v.oscPhaseR[o] += v.incR[o];
                     if (v.oscPhaseR[o] >= 1.0f) v.oscPhaseR[o] -= 1.0f;
                     sL += sawWave(v.oscPhase[o]) * inv;
                     sR += sawWave(v.oscPhaseR[o]) * inv;

@@ -1,0 +1,154 @@
+name: Build and verify MixAgent
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+env:
+  JUCE_REVISION: f72bad64d29715216226685810c5196bd0d79d77
+  SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  windows-vst3:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.SOURCE_REVISION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fetch and verify pinned JUCE
+        run: |
+          New-Item -ItemType Directory -Force third_party | Out-Null
+          git init third_party/JUCE
+          if ($LASTEXITCODE -ne 0) { throw 'JUCE git init failed' }
+          git -C third_party/JUCE remote add origin https://github.com/juce-framework/JUCE.git
+          if ($LASTEXITCODE -ne 0) { throw 'JUCE remote setup failed' }
+          git -C third_party/JUCE fetch --depth 1 origin $env:JUCE_REVISION
+          if ($LASTEXITCODE -ne 0) { throw 'JUCE fetch failed' }
+          git -C third_party/JUCE checkout --detach FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'JUCE checkout failed' }
+          $actual = (git -C third_party/JUCE rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actual -ne $env:JUCE_REVISION) { throw 'JUCE revision mismatch' }
+      - name: Test release failures
+        run: python -B -m unittest discover -s Tests -p 'test_*vst3*.py' -v
+      - name: Configure Windows x64
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DMIXAGENT_COPY_PLUGIN_AFTER_BUILD=OFF "-DFETCHCONTENT_SOURCE_DIR_JUCE=$env:GITHUB_WORKSPACE/third_party/JUCE"
+      - name: Build plugin, standalone and all regression targets
+        run: cmake --build build --config Release --parallel 2
+      - name: Snapshot complete native deliverables before tests
+        run: python Tools/vst3_gate.py --build-dir build --platform windows-x64 --vendor AgentMix --product MixAgent --additional-binary build/MixAgent_artefacts/Release/Standalone/MixAgent.exe --snapshot release-evidence/before-tests.json
+      - name: Repeat audio, editor, allocation and actual VST3 host tests
+        run: ctest --test-dir build -C Release --output-on-failure --no-tests=error --repeat until-fail:2 --output-junit ctest-results.xml
+      - name: Record deterministic callback benchmarks (no timing threshold)
+        run: |
+          foreach ($attempt in 1..3) {
+            & ./build/MixAgentStressTest_artefacts/Release/MixAgentStressTest.exe --benchmark | Tee-Object -FilePath "release-evidence/benchmark-$attempt.txt"
+            if ($LASTEXITCODE -ne 0) { throw "Benchmark workload failed on attempt $attempt" }
+          }
+      - name: Prove tests preserved architecture, identity and resources
+        run: python Tools/vst3_gate.py --build-dir build --platform windows-x64 --vendor AgentMix --product MixAgent --additional-binary build/MixAgent_artefacts/Release/Standalone/MixAgent.exe --check-snapshot release-evidence/before-tests.json
+      - name: Package complete deliverables with pinned provenance
+        run: python Tools/package_release.py --build-dir build --platform windows-x64 --source-commit $env:SOURCE_REVISION --juce-commit $env:JUCE_REVISION --output release/MixAgent
+      - name: Host the actual delivered copies twice and verify unchanged files
+        run: |
+          python Tools/vst3_gate.py --bundle-dir release/MixAgent/vst3 --platform windows-x64 --vendor AgentMix --product MixAgent --additional-binary release/MixAgent/standalone/MixAgent.exe --report release-evidence/host-package.json -- ./build/MixAgentVst3HostSmoke_artefacts/Release/MixAgentVst3HostSmoke.exe (Join-Path $env:GITHUB_WORKSPACE 'release/MixAgent/vst3/MixAgent.vst3') | Tee-Object -FilePath release-evidence/host-package.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Delivered VST3 host gate failed' }
+          python Tools/package_release.py --verify release/MixAgent --source-commit $env:SOURCE_REVISION
+          if ($LASTEXITCODE -ne 0) { throw 'Delivered package integrity failed' }
+      - name: Upload verified installable Windows release
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: MixAgent-Windows-VST3-Standalone
+          path: release/MixAgent/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload actual test, benchmark and host evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: MixAgent-Windows-release-evidence
+          path: |
+            release-evidence/
+            build/release-evidence/
+            build/ctest-results.xml
+            build/mixagent-ui*.png
+          if-no-files-found: warn
+
+  linux-vst3:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.SOURCE_REVISION }}
+      - name: Install Linux audio and UI dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libasound2-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxext-dev libxcomposite-dev libfreetype-dev libfontconfig1-dev libcurl4-openssl-dev libgtk-3-dev mesa-common-dev libglu1-mesa-dev xvfb
+      - name: Fetch and verify pinned JUCE
+        run: |
+          mkdir -p third_party
+          git init third_party/JUCE
+          git -C third_party/JUCE remote add origin https://github.com/juce-framework/JUCE.git
+          git -C third_party/JUCE fetch --depth 1 origin "$JUCE_REVISION"
+          git -C third_party/JUCE checkout --detach FETCH_HEAD
+          test "$(git -C third_party/JUCE rev-parse HEAD)" = "$JUCE_REVISION"
+      - name: Test release failures
+        run: python3 -B -m unittest discover -s Tests -p 'test_*vst3*.py' -v
+      - name: Configure and build all deliverables
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DMIXAGENT_COPY_PLUGIN_AFTER_BUILD=OFF -DFETCHCONTENT_SOURCE_DIR_JUCE="$PWD/third_party/JUCE"
+          cmake --build build --parallel 2
+      - name: Snapshot complete native deliverables before tests
+        run: python3 Tools/vst3_gate.py --build-dir build --platform linux-x86_64 --vendor AgentMix --product MixAgent --additional-binary build/MixAgent_artefacts/Release/Standalone/MixAgent --snapshot release-evidence/before-tests.json
+      - name: Repeat audio, editor, allocation and actual VST3 host tests
+        run: xvfb-run -a ctest --test-dir build --output-on-failure --no-tests=error --repeat until-fail:2 --output-junit ctest-results.xml
+      - name: Record deterministic callback benchmarks (no timing threshold)
+        run: |
+          for attempt in 1 2 3; do
+            xvfb-run -a ./build/MixAgentStressTest_artefacts/Release/MixAgentStressTest --benchmark | tee "release-evidence/benchmark-$attempt.txt"
+          done
+      - name: Prove tests preserved architecture, identity and resources
+        run: python3 Tools/vst3_gate.py --build-dir build --platform linux-x86_64 --vendor AgentMix --product MixAgent --additional-binary build/MixAgent_artefacts/Release/Standalone/MixAgent --check-snapshot release-evidence/before-tests.json
+      - name: Package complete deliverables with pinned provenance
+        run: python3 Tools/package_release.py --build-dir build --platform linux-x86_64 --source-commit "$SOURCE_REVISION" --juce-commit "$JUCE_REVISION" --output release/MixAgent
+      - name: Host the actual delivered copies twice and verify unchanged files
+        run: |
+          xvfb-run -a python3 Tools/vst3_gate.py --bundle-dir release/MixAgent/vst3 --platform linux-x86_64 --vendor AgentMix --product MixAgent --additional-binary release/MixAgent/standalone/MixAgent --report release-evidence/host-package.json -- ./build/MixAgentVst3HostSmoke_artefacts/Release/MixAgentVst3HostSmoke "$PWD/release/MixAgent/vst3/MixAgent.vst3" | tee release-evidence/host-package.txt
+          python3 Tools/package_release.py --verify release/MixAgent --source-commit "$SOURCE_REVISION"
+      - name: Upload verified Linux release
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: MixAgent-Linux-x86_64-VST3-Standalone
+          path: release/MixAgent/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload actual test, benchmark and host evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: MixAgent-Linux-release-evidence
+          path: |
+            release-evidence/
+            build/release-evidence/
+            build/ctest-results.xml
+            build/mixagent-ui*.png
+          if-no-files-found: warn

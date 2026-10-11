@@ -10,7 +10,7 @@
 #include "DSP/DrumEngine.h"
 #include "DSP/InstrumentBank.h"
 
-class MixAgentAudioProcessor : public juce::AudioProcessor, public juce::AudioProcessorValueTreeState::Listener
+class MixAgentAudioProcessor : public juce::AudioProcessor
 {
 public:
     MixAgentAudioProcessor();
@@ -27,10 +27,10 @@ public:
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 5.0; }
+    double getTailLengthSeconds() const override;
 
     int getNumPrograms() override { return kPresetCount; }
-    int getCurrentProgram() override { return currentProgram; }
+    int getCurrentProgram() override { return currentProgram.load(std::memory_order_relaxed); }
     void setCurrentProgram(int index) override;
     const juce::String getProgramName(int index) override;
     void changeProgramName(int, const juce::String&) override {}
@@ -41,17 +41,16 @@ public:
     bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
 
     juce::AudioProcessorValueTreeState& getAPVTS() { return apvts; }
-    void parameterChanged(const juce::String& parameterID, float newValue) override;
-
     void getAnalyzerSpectrum(float* outDb, int n) const;
     void getEqCurve(float* outDb, int n) const;
     float getInLevel(int ch) const;
     float getOutLevel(int ch) const;
     float getCompGrDb() const { return compressor.getGainReductionDb(); }
     float getLimGrDb() const { return limiter.getGainReductionDb(); }
-    bool getInstrumentActive() const { return instruments.isActive(); }
-    int getInstrumentProgram() const { return instruments.getProgram(); }
-    void setInstrumentProgram(int p) { instruments.setProgram(p); }
+    bool getInstrumentActive() const { return instrumentActive.load(std::memory_order_relaxed); }
+    double getProcessingSampleRate() const { return sampleRate.load(std::memory_order_relaxed); }
+    int getInstrumentProgram() const;
+    void setInstrumentProgram(int p);
     bool isFavorite(int program) const;
     void setFavorite(int program, bool fav);
     int getFavoriteCount() const;
@@ -60,10 +59,13 @@ public:
     // UI-driven triggers (message thread safe; drained on the audio thread)
     void uiNoteOn(int note, float velocity);
     void uiNoteOff(int note);
+    void uiAllSoundOff();
 
 private:
     void handleParameter(const juce::String& id, float rawValue);
-    void syncModules();
+    void syncModules(bool force = false);
+    void enqueueUiNote(int note, float velocity, bool on);
+    void dispatchMidi(const juce::MidiMessage& message);
     void pushAnalyser(const juce::AudioBuffer<float>& buffer);
     void runFft();
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
@@ -79,18 +81,33 @@ private:
     agm::DrumEngine drumEngine;
     agm::InstrumentBank instruments;
 
-    float inGainDb = 0.0f, outGainDb = 0.0f;
+    struct ParameterSnapshot
+    {
+        juce::String id;
+        std::atomic<float>* value;
+        float lastValue;
+    };
+    std::vector<ParameterSnapshot> parameterSnapshots;
+
+    float inGainTarget = 1.0f, outGainTarget = 1.0f;
+    float gainSmoothingCoef = 0.0f;
     float inGainSmoothed = 1.0f, outGainSmoothed = 1.0f;
-    double sampleRate = 44100.0;
-    int currentProgram = 0;
+    std::atomic<double> sampleRate { 44100.0 };
+    std::atomic<int> currentProgram { 0 };
+    std::atomic<bool> instrumentActive { false };
     static constexpr int kPresetCount = 12;
 
     std::atomic<float> inLevelL { 0.0f }, inLevelR { 0.0f };
     std::atomic<float> outLevelL { 0.0f }, outLevelR { 0.0f };
     float inPeakL = 0.0f, inPeakR = 0.0f, outPeakL = 0.0f, outPeakR = 0.0f;
 
-    juce::CriticalSection uiNoteLock;
-    juce::MidiBuffer uiNotes;
+    // Single message-thread producer, single audio-thread consumer. Overflow
+    // requests a panic rather than leaving a dropped note-off hanging forever.
+    struct UiNote { int note = 0; float velocity = 0.0f; bool on = false; };
+    static constexpr int kUiNoteCapacity = 128;
+    std::array<UiNote, kUiNoteCapacity> uiNotes {};
+    juce::AbstractFifo uiNoteFifo { kUiNoteCapacity };
+    std::atomic<bool> uiPanic { false };
 
     static constexpr int kFftSize = 2048;
     static constexpr int kAnaBins = 600;
@@ -99,8 +116,7 @@ private:
     std::vector<float> fftIn;
     std::vector<float> fftWork;
     std::vector<int> bucketMap;
-    std::vector<float> bucketSum;
-    std::vector<int> bucketCount;
+    std::vector<float> bucketPeak;
     std::vector<float> anaSmooth;
     std::array<std::atomic<float>, kAnaBins> anaOut {};
     int fftPos = 0;
